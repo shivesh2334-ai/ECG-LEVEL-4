@@ -1,0 +1,10 @@
+# Create project directory
+mkdir label-ecg
+cd label-ecg
+
+# Initialize npm project
+npm init -y
+
+# Install dependencies
+npm install react react-dom recharts lucide-react
+npm install --save-dev @vitejs/plugin-react vite
