@@ -1,14 +1,9 @@
 
 // src/lib/supabase.js
 import { createClient } from '@supabase/supabase-js'
-import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
-#const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-#const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+const supabaseUrl = process.env.NEXT_PUBLIC_ecg4_SUPABASE_URL
+const supabaseAnonKey = process.env.NEXT_PUBLIC_ecg4_SUPABASE_ANON_KEY
 
 if (!supabaseUrl || !supabaseAnonKey) {
   console.error('Missing Supabase credentials')
@@ -16,7 +11,8 @@ if (!supabaseUrl || !supabaseAnonKey) {
 }
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
- // Authentication functions
+
+// Authentication functions
 export const authService = {
   // Sign up new user
   async signUp(email, password, userData) {
@@ -448,4 +444,4 @@ export const statsService = {
     if (error) throw error
     return data
   }
-  }
+}
