@@ -1,18 +1,34 @@
-
 // src/lib/supabase.js
+//
+// Supabase client + data-access layer for LabelECG.
+// This is the ONLY place ECG data is read from / written to — there is
+// no local/sample data generator anywhere else in the app.
+//
+// Required environment variables (see .env.example):
+//   VITE_SUPABASE_URL
+//   VITE_SUPABASE_ANON_KEY
+//
+// NOTE: this is a Vite project (see vite.config.js), so env vars must be
+// prefixed with VITE_ and read via import.meta.env — NOT process.env / the
+// Next.js NEXT_PUBLIC_ convention that was here before.
+
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_ecg4_SUPABASE_URL
-const supabaseAnonKey = process.env.NEXT_PUBLIC_ecg4_SUPABASE_ANON_KEY
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 if (!supabaseUrl || !supabaseAnonKey) {
-  console.error('Missing Supabase credentials')
-  throw new Error('Supabase URL and Anon Key must be provided')
+  throw new Error(
+    'Missing Supabase credentials. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY ' +
+    'in a .env file at the project root (see .env.example).'
+  )
 }
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
-// Authentication functions
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
 export const authService = {
   // Sign up new user
   async signUp(email, password, userData) {
@@ -20,10 +36,10 @@ export const authService = {
       email,
       password,
     })
-    
+
     if (authError) throw authError
-    
-    // Create user profile
+
+    // Create user profile row (id must match auth.users.id — see schema.sql)
     const { data, error } = await supabase
       .from('users')
       .insert([{
@@ -34,71 +50,77 @@ export const authService = {
         hospital_name: userData.hospitalName
       }])
       .select()
-    
+
     if (error) throw error
     return data[0]
   },
-  
+
   // Sign in
   async signIn(email, password) {
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
     })
-    
+
     if (error) throw error
-    
-    // Get user profile
+
     const { data: userData, error: userError } = await supabase
       .from('users')
       .select('*')
       .eq('id', data.user.id)
       .single()
-    
+
     if (userError) throw userError
     return userData
   },
-  
+
   // Sign out
   async signOut() {
     const { error } = await supabase.auth.signOut()
     if (error) throw error
   },
-  
-  // Get current user
+
+  // Get current session's user profile (null if not signed in)
   async getCurrentUser() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return null
-    
+
     const { data, error } = await supabase
       .from('users')
       .select('*')
       .eq('id', user.id)
-      .single()
-    
+      .maybeSingle()
+
     if (error) throw error
     return data
   }
 }
 
-// Dataset functions
+// ---------------------------------------------------------------------------
+// Datasets
+// ---------------------------------------------------------------------------
 export const datasetService = {
-  // Get all datasets
+  // Get all active datasets, with uploader info and a real record count
   async getDatasets() {
     const { data, error } = await supabase
       .from('datasets')
       .select(`
         *,
-        users:uploaded_by (username, hospital_name)
+        users:uploaded_by (username, hospital_name),
+        ecg_records(count)
       `)
       .eq('is_active', true)
       .order('created_at', { ascending: false })
-    
+
     if (error) throw error
-    return data
+
+    return (data || []).map(ds => ({
+      ...ds,
+      record_count: ds.ecg_records?.[0]?.count ?? 0
+    }))
   },
-  
-  // Create new dataset
+
+  // Create a new dataset (metadata row only — records are added separately)
   async createDataset(datasetData, userId) {
     const { data, error } = await supabase
       .from('datasets')
@@ -110,53 +132,65 @@ export const datasetService = {
       }])
       .select()
       .single()
-    
+
     if (error) throw error
     return data
   },
-  
-  // Get dataset progress
+
+  // Progress (annotated vs total) for one dataset, via SQL function
   async getDatasetProgress(datasetId) {
     const { data, error } = await supabase
       .rpc('get_dataset_progress', { dataset_uuid: datasetId })
-    
+
     if (error) throw error
     return data[0]
+  },
+
+  // Per-annotator coverage for one dataset — used by the Review screen
+  async getDatasetAnnotationSummary(datasetId) {
+    const { data, error } = await supabase
+      .rpc('get_dataset_annotator_summary', { dataset_uuid: datasetId })
+
+    if (error) throw error
+    return data
   }
 }
 
-// ECG Records functions
+// ---------------------------------------------------------------------------
+// ECG records (metadata) + raw waveform data
+// ---------------------------------------------------------------------------
 export const ecgService = {
-  // Get ECG records for a dataset
+  // Lightweight list of records for a dataset (NO waveform data — keeps the
+  // dataset browser fast even for large real-world datasets)
   async getRecords(datasetId) {
     const { data, error } = await supabase
       .from('ecg_records')
       .select('*')
       .eq('dataset_id', datasetId)
       .order('record_number', { ascending: true })
-    
+
     if (error) throw error
     return data
   },
-  
-  // Get single ECG record with raw data
+
+  // Fetch one record's metadata + its full 12-lead waveform, on demand
   async getRecordWithData(recordId) {
     const { data: record, error: recordError } = await supabase
       .from('ecg_records')
       .select('*')
       .eq('id', recordId)
       .single()
-    
+
     if (recordError) throw recordError
-    
+
     const { data: rawData, error: rawError } = await supabase
       .from('ecg_raw_data')
       .select('*')
       .eq('ecg_record_id', recordId)
       .single()
-    
+
     if (rawError) throw rawError
-    
+
     return {
       ...record,
       leads: {
@@ -177,10 +211,11 @@ export const ecgService = {
       duration: rawData.duration
     }
   },
-  
-  // Upload ECG record
+
+  // Insert one real ECG record (metadata + 12 lead sample arrays).
+  // recordData.leads must be an array of 12 arrays of numeric samples —
+  // there is no synthetic/random fallback here.
   async uploadRecord(datasetId, recordData) {
-    // First, insert metadata
     const { data: record, error: recordError } = await supabase
       .from('ecg_records')
       .insert([{
@@ -197,11 +232,10 @@ export const ecgService = {
       }])
       .select()
       .single()
-    
+
     if (recordError) throw recordError
-    
-    // Then, insert raw ECG data
-    const { data: rawData, error: rawError } = await supabase
+
+    const { error: rawError } = await supabase
       .from('ecg_raw_data')
       .insert([{
         ecg_record_id: record.id,
@@ -220,30 +254,38 @@ export const ecgService = {
         sampling_rate: recordData.samplingRate || 500,
         duration: recordData.duration
       }])
-    
-    if (rawError) throw rawError
-    
+
+    if (rawError) {
+      // Roll back the orphaned metadata row if the waveform insert failed
+      await supabase.from('ecg_records').delete().eq('id', record.id)
+      throw rawError
+    }
+
     return record
   },
-  
-  // Batch upload multiple records
-  async batchUploadRecords(datasetId, records) {
+
+  // Batch upload multiple real records parsed from an uploaded file.
+  // onProgress(current, total) is optional, for large-dataset upload UIs.
+  async batchUploadRecords(datasetId, records, onProgress) {
     const results = []
-    for (const record of records) {
+    for (let i = 0; i < records.length; i++) {
       try {
-        const result = await this.uploadRecord(datasetId, record)
+        const result = await this.uploadRecord(datasetId, records[i])
         results.push({ success: true, data: result })
       } catch (error) {
-        results.push({ success: false, error: error.message, record })
+        results.push({ success: false, error: error.message, record: records[i] })
       }
+      if (onProgress) onProgress(i + 1, records.length)
     }
     return results
   }
 }
 
-// Annotation functions
+// ---------------------------------------------------------------------------
+// Annotations
+// ---------------------------------------------------------------------------
 export const annotationService = {
-  // Get annotations for a record
+  // All annotations for a record (every annotator + reviewer)
   async getAnnotations(recordId) {
     const { data, error } = await supabase
       .from('annotations')
@@ -253,12 +295,12 @@ export const annotationService = {
         reviewer:reviewed_by (username, role)
       `)
       .eq('ecg_record_id', recordId)
-    
+
     if (error) throw error
     return data
   },
-  
-  // Get user's annotation for a record
+
+  // The signed-in user's own annotation for a record (or null)
   async getUserAnnotation(recordId, userId) {
     const { data, error } = await supabase
       .from('annotations')
@@ -266,18 +308,16 @@ export const annotationService = {
       .eq('ecg_record_id', recordId)
       .eq('annotator_id', userId)
       .maybeSingle()
-    
+
     if (error) throw error
     return data
   },
-  
-  // Create or update annotation
+
+  // Create or update the signed-in user's annotation for a record
   async saveAnnotation(recordId, userId, annotationData) {
-    // Check if annotation exists
     const existing = await this.getUserAnnotation(recordId, userId)
-    
+
     if (existing) {
-      // Update existing
       const { data, error } = await supabase
         .from('annotations')
         .update({
@@ -290,20 +330,18 @@ export const annotationService = {
         .eq('id', existing.id)
         .select()
         .single()
-      
+
       if (error) throw error
-      
-      // Log history
+
       await this.logAnnotationHistory(existing.id, userId, 'updated', {
         old_diagnosis: existing.diagnosis,
         new_diagnosis: annotationData.diagnosis,
         old_status: existing.status,
         new_status: annotationData.status
       })
-      
+
       return data
     } else {
-      // Create new
       const { data, error } = await supabase
         .from('annotations')
         .insert([{
@@ -316,20 +354,19 @@ export const annotationService = {
         }])
         .select()
         .single()
-      
+
       if (error) throw error
-      
-      // Log history
+
       await this.logAnnotationHistory(data.id, userId, 'created', {
         new_diagnosis: annotationData.diagnosis,
         new_status: annotationData.status
       })
-      
+
       return data
     }
   },
-  
-  // Review annotation (for experts)
+
+  // Review an annotation (expert/admin only — also enforced by RLS)
   async reviewAnnotation(annotationId, reviewerId, reviewNotes) {
     const { data, error } = await supabase
       .from('annotations')
@@ -342,17 +379,16 @@ export const annotationService = {
       .eq('id', annotationId)
       .select()
       .single()
-    
+
     if (error) throw error
-    
+
     await this.logAnnotationHistory(annotationId, reviewerId, 'reviewed', {
       new_status: 'reviewed'
     })
-    
+
     return data
   },
-  
-  // Log annotation history
+
   async logAnnotationHistory(annotationId, userId, action, changes) {
     const { error } = await supabase
       .from('annotation_history')
@@ -365,20 +401,18 @@ export const annotationService = {
         old_status: changes.old_status,
         new_status: changes.new_status
       }])
-    
+
     if (error) throw error
   },
-  
-  // Get user statistics
+
   async getUserStats(userId) {
     const { data, error } = await supabase
       .rpc('get_user_annotation_stats', { user_id: userId })
-    
+
     if (error) throw error
     return data[0]
   },
-  
-  // Get all annotations by user
+
   async getUserAnnotations(userId) {
     const { data, error } = await supabase
       .from('annotations')
@@ -387,46 +421,38 @@ export const annotationService = {
         ecg_record:ecg_record_id (
           patient_id,
           heart_rate,
-          dataset:dataset_id (name)
+          dataset:dataset_id (id, name)
         )
       `)
       .eq('annotator_id', userId)
       .order('created_at', { ascending: false })
-    
+
     if (error) throw error
     return data
   }
 }
 
-// Statistics functions
+// ---------------------------------------------------------------------------
+// Platform-wide statistics
+// ---------------------------------------------------------------------------
 export const statsService = {
-  // Get platform statistics
   async getPlatformStats() {
-    const { data: datasets } = await supabase
-      .from('datasets')
-      .select('id')
-    
-    const { data: records } = await supabase
-      .from('ecg_records')
-      .select('id')
-    
-    const { data: users } = await supabase
-      .from('users')
-      .select('id')
-    
-    const { data: annotations } = await supabase
-      .from('annotations')
-      .select('id')
-    
+    const [{ count: datasetCount }, { count: recordCount }, { count: userCount }, { count: annotationCount }] =
+      await Promise.all([
+        supabase.from('datasets').select('id', { count: 'exact', head: true }).eq('is_active', true),
+        supabase.from('ecg_records').select('id', { count: 'exact', head: true }),
+        supabase.from('users').select('id', { count: 'exact', head: true }),
+        supabase.from('annotations').select('id', { count: 'exact', head: true })
+      ])
+
     return {
-      totalDatasets: datasets?.length || 0,
-      totalRecords: records?.length || 0,
-      totalUsers: users?.length || 0,
-      totalAnnotations: annotations?.length || 0
+      totalDatasets: datasetCount || 0,
+      totalRecords: recordCount || 0,
+      totalUsers: userCount || 0,
+      totalAnnotations: annotationCount || 0
     }
   },
-  
-  // Get recent activity
+
   async getRecentActivity(limit = 10) {
     const { data, error } = await supabase
       .from('annotations')
@@ -440,7 +466,7 @@ export const statsService = {
       `)
       .order('created_at', { ascending: false })
       .limit(limit)
-    
+
     if (error) throw error
     return data
   }

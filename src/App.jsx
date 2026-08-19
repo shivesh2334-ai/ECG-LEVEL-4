@@ -1,283 +1,342 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, ChevronRight, Settings, LogOut, Users, Database, FileText, Download } from 'lucide-react';
+import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, ChevronRight, Settings, LogOut, Users, Database, FileText, Download, Loader2 } from 'lucide-react';
+import { authService, datasetService, ecgService, annotationService, statsService } from './lib/supabase';
+import { parseEcgCsv } from './lib/ecgFileParser';
+
+const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
 
 const ECGAnnotationPlatform = () => {
   const [currentUser, setCurrentUser] = useState(null);
-  const [view, setView] = useState('login');
-  const [users, setUsers] = useState({});
-  const [datasets, setDatasets] = useState({});
-  const [annotations, setAnnotations] = useState({});
+  const [view, setView] = useState('loading');
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // Dashboard / datasets
+  const [datasets, setDatasets] = useState([]);
+  const [platformStats, setPlatformStats] = useState({ totalDatasets: 0, totalRecords: 0, totalUsers: 0, totalAnnotations: 0 });
+  const [recentActivity, setRecentActivity] = useState([]);
+  const [userAnnotationCounts, setUserAnnotationCounts] = useState({}); // datasetId -> count for current user
+
+  // Annotate view
   const [currentDataset, setCurrentDataset] = useState(null);
+  const [currentDatasetRecords, setCurrentDatasetRecords] = useState([]); // metadata only
   const [currentRecordIndex, setCurrentRecordIndex] = useState(0);
+  const [currentRecordData, setCurrentRecordData] = useState(null); // metadata + leads for the active record
+  const [recordLoading, setRecordLoading] = useState(false);
+  const [userAnnotation, setUserAnnotation] = useState(null);
+  const [recordAnnotations, setRecordAnnotations] = useState([]); // all annotators for this record
   const [annotationText, setAnnotationText] = useState('');
   const [visibleLeads, setVisibleLeads] = useState([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
-  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
-  const [registerForm, setRegisterForm] = useState({ username: '', password: '', role: 'annotator', verificationCode: '', hospitalName: '' });
-  const [uploadForm, setUploadForm] = useState({ datasetName: '', description: '', file: null });
   const [reviewMode, setReviewMode] = useState(false);
-  const [selectedAnnotator, setSelectedAnnotator] = useState(null);
 
-  // Load data from shared storage on mount
+  // Auth forms
+  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
+  const [registerForm, setRegisterForm] = useState({ username: '', email: '', password: '', role: 'annotator', hospitalName: '' });
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+
+  // Upload view
+  const [uploadForm, setUploadForm] = useState({ datasetName: '', description: '', file: null });
+  const [uploadStatus, setUploadStatus] = useState(null); // { stage, message, progress? }
+
+  // Review view
+  const [reviewSummaries, setReviewSummaries] = useState({}); // datasetId -> { progress, annotators }
+  const [reviewLoading, setReviewLoading] = useState(false);
+
+  // Account view
+  const [accountStats, setAccountStats] = useState(null);
+  const [accountAnnotations, setAccountAnnotations] = useState([]);
+
+  // ---------------------------------------------------------------------
+  // Auth bootstrap
+  // ---------------------------------------------------------------------
   useEffect(() => {
-    loadData();
+    (async () => {
+      try {
+        const user = await authService.getCurrentUser();
+        if (user) {
+          setCurrentUser(user);
+          setView('dashboard');
+        } else {
+          setView('login');
+        }
+      } catch (err) {
+        console.error('Session check failed:', err);
+        setView('login');
+      } finally {
+        setAuthChecked(true);
+      }
+    })();
   }, []);
 
-  const loadData = async () => {
+  useEffect(() => {
+    if (view === 'dashboard' && currentUser) {
+      loadDashboardData();
+    }
+    if (view === 'datasets' && currentUser) {
+      loadDatasetsForBrowsing();
+    }
+    if (view === 'review' && currentUser) {
+      loadReviewData();
+    }
+    if (view === 'account' && currentUser) {
+      loadAccountData();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, currentUser]);
+
+  useEffect(() => {
+    if (view === 'annotate' && currentDatasetRecords.length > 0) {
+      loadCurrentRecord();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, currentRecordIndex, currentDatasetRecords]);
+
+  // ---------------------------------------------------------------------
+  // Data loading
+  // ---------------------------------------------------------------------
+  const loadDashboardData = async () => {
     try {
-      const usersData = await window.storage.get('users', true);
-      const datasetsData = await window.storage.get('datasets', true);
-      const annotationsData = await window.storage.get('annotations', true);
-      
-      if (usersData) setUsers(JSON.parse(usersData.value));
-      if (datasetsData) setDatasets(JSON.parse(datasetsData.value));
-      if (annotationsData) setAnnotations(JSON.parse(annotationsData.value));
-    } catch (error) {
-      console.log('Initializing new storage');
-      initializeSampleData();
+      const [ds, stats, activity] = await Promise.all([
+        datasetService.getDatasets(),
+        statsService.getPlatformStats(),
+        statsService.getRecentActivity(5)
+      ]);
+      setDatasets(ds);
+      setPlatformStats(stats);
+      setRecentActivity(activity);
+    } catch (err) {
+      console.error('Failed to load dashboard data:', err);
     }
   };
 
-  const saveData = async (type, data) => {
+  const loadDatasetsForBrowsing = async () => {
     try {
-      await window.storage.set(type, JSON.stringify(data), true);
-    } catch (error) {
-      console.error('Error saving data:', error);
-      alert('Error saving data. Please try again.');
+      const [ds, userAnns] = await Promise.all([
+        datasetService.getDatasets(),
+        annotationService.getUserAnnotations(currentUser.id)
+      ]);
+      setDatasets(ds);
+
+      const counts = {};
+      userAnns.forEach(a => {
+        const dsId = a.ecg_record?.dataset?.id;
+        if (dsId) counts[dsId] = (counts[dsId] || 0) + 1;
+      });
+      setUserAnnotationCounts(counts);
+    } catch (err) {
+      console.error('Failed to load datasets:', err);
     }
   };
 
-  const initializeSampleData = () => {
-    const generateECGData = (numSamples = 500, type = 'normal') => {
-      const data = [];
-      for (let i = 0; i < numSamples; i++) {
-        const baseValue = type === 'afib' ? Math.random() * 0.3 : 0;
-        const noise = type === 'noisy' ? Math.random() * 0.2 : Math.random() * 0.05;
-        data.push(Math.sin(i * 0.1) * (0.5 + baseValue) + noise);
+  const loadReviewData = async () => {
+    setReviewLoading(true);
+    try {
+      const ds = await datasetService.getDatasets();
+      setDatasets(ds);
+      const summaries = {};
+      for (const dataset of ds) {
+        const [progress, annotators] = await Promise.all([
+          datasetService.getDatasetProgress(dataset.id),
+          datasetService.getDatasetAnnotationSummary(dataset.id)
+        ]);
+        summaries[dataset.id] = { progress, annotators };
       }
-      return data;
-    };
-
-    const sampleDatasets = {
-      'dataset1': {
-        id: 'dataset1',
-        name: 'Beijing Tsinghua Hospital - Resting ECG',
-        description: '12-lead resting ECG records from cardiology department',
-        uploadedBy: 'admin',
-        uploadDate: '2024-10-01',
-        records: [
-          {
-            id: 'rec1',
-            patientId: 'P001',
-            timestamp: '2024-10-01T10:30:00',
-            heartRate: 72,
-            prInterval: 160,
-            qrsDuration: 90,
-            qtInterval: 380,
-            leads: Array(12).fill(null).map(() => generateECGData(500, 'normal')),
-            autoAnalysis: 'Normal sinus rhythm',
-            leadNames: ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
-          },
-          {
-            id: 'rec2',
-            patientId: 'P002',
-            timestamp: '2024-10-01T11:00:00',
-            heartRate: 95,
-            prInterval: 180,
-            qrsDuration: 95,
-            qtInterval: 420,
-            leads: Array(12).fill(null).map(() => generateECGData(500, 'afib')),
-            autoAnalysis: 'Possible atrial fibrillation - irregular rhythm detected',
-            leadNames: ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
-          },
-          {
-            id: 'rec3',
-            patientId: 'P003',
-            timestamp: '2024-10-01T11:30:00',
-            heartRate: 68,
-            prInterval: 155,
-            qrsDuration: 88,
-            qtInterval: 390,
-            leads: Array(12).fill(null).map(() => generateECGData(500, 'normal')),
-            autoAnalysis: 'Normal sinus rhythm with sinus arrhythmia',
-            leadNames: ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
-          }
-        ]
-      }
-    };
-
-    const sampleUsers = {
-      'admin': { username: 'admin', password: 'admin123', role: 'admin', hospitalName: 'System Administrator' },
-      'doctor1': { username: 'doctor1', password: 'doc123', role: 'expert', hospitalName: 'Beijing Tsinghua Hospital' },
-      'doctor2': { username: 'doctor2', password: 'doc456', role: 'expert', hospitalName: 'Qingdao Hospital' },
-      'tech1': { username: 'tech1', password: 'tech123', role: 'annotator', hospitalName: 'Beijing Tsinghua Hospital' },
-      'tech2': { username: 'tech2', password: 'tech456', role: 'annotator', hospitalName: 'Tianjin Hospital' }
-    };
-
-    setUsers(sampleUsers);
-    setDatasets(sampleDatasets);
-    saveData('users', sampleUsers);
-    saveData('datasets', sampleDatasets);
+      setReviewSummaries(summaries);
+    } catch (err) {
+      console.error('Failed to load review data:', err);
+    } finally {
+      setReviewLoading(false);
+    }
   };
 
-  const handleLogin = () => {
-    const user = users[loginForm.username];
-    if (user && user.password === loginForm.password) {
+  const loadAccountData = async () => {
+    try {
+      const [stats, anns] = await Promise.all([
+        annotationService.getUserStats(currentUser.id),
+        annotationService.getUserAnnotations(currentUser.id)
+      ]);
+      setAccountStats(stats);
+      setAccountAnnotations(anns);
+    } catch (err) {
+      console.error('Failed to load account data:', err);
+    }
+  };
+
+  const loadCurrentRecord = async () => {
+    const meta = currentDatasetRecords[currentRecordIndex];
+    if (!meta) return;
+    setRecordLoading(true);
+    setAnnotationText('');
+    try {
+      const [full, mine, all] = await Promise.all([
+        ecgService.getRecordWithData(meta.id),
+        annotationService.getUserAnnotation(meta.id, currentUser.id),
+        annotationService.getAnnotations(meta.id)
+      ]);
+      setCurrentRecordData(full);
+      setUserAnnotation(mine);
+      setAnnotationText(mine?.diagnosis || '');
+      setRecordAnnotations(all);
+    } catch (err) {
+      console.error('Failed to load record:', err);
+      alert('Could not load this ECG record. It may be missing its waveform data.');
+    } finally {
+      setRecordLoading(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------
+  // Auth actions
+  // ---------------------------------------------------------------------
+  const handleLogin = async () => {
+    setAuthError('');
+    if (!loginForm.email || !loginForm.password) {
+      setAuthError('Enter your email and password');
+      return;
+    }
+    setAuthBusy(true);
+    try {
+      const user = await authService.signIn(loginForm.email, loginForm.password);
       setCurrentUser(user);
       setView('dashboard');
-    } else {
-      alert('Invalid credentials');
+      setLoginForm({ email: '', password: '' });
+    } catch (err) {
+      setAuthError(err.message || 'Login failed');
+    } finally {
+      setAuthBusy(false);
     }
   };
 
-  const handleRegister = () => {
-    if (registerForm.verificationCode !== 'VERIFY2024') {
-      alert('Invalid verification code. Contact your administrator.');
+  const handleRegister = async () => {
+    setAuthError('');
+    if (!registerForm.username || !registerForm.email || !registerForm.password) {
+      setAuthError('Username, email, and password are required');
       return;
     }
-    if (users[registerForm.username]) {
-      alert('Username already exists');
+    if (registerForm.password.length < 6) {
+      setAuthError('Password must be at least 6 characters');
       return;
     }
-    const newUsers = {
-      ...users,
-      [registerForm.username]: {
-        username: registerForm.username,
-        password: registerForm.password,
-        role: registerForm.role,
-        hospitalName: registerForm.hospitalName
-      }
-    };
-    setUsers(newUsers);
-    saveData('users', newUsers);
-    alert('Registration successful! Please login.');
+    setAuthBusy(true);
+    try {
+      await authService.signUp(registerForm.email, registerForm.password, registerForm);
+      alert('Registration successful! Please check your email to confirm your account, then log in.');
+      setRegisterForm({ username: '', email: '', password: '', role: 'annotator', hospitalName: '' });
+      setView('login');
+    } catch (err) {
+      setAuthError(err.message || 'Registration failed');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await authService.signOut();
+    } catch (err) {
+      console.error('Sign out failed:', err);
+    }
+    setCurrentUser(null);
+    setCurrentDataset(null);
+    setCurrentDatasetRecords([]);
+    setCurrentRecordData(null);
     setView('login');
   };
 
+  // ---------------------------------------------------------------------
+  // Upload (real ECG data only — see src/lib/ecgFileParser.js)
+  // ---------------------------------------------------------------------
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
-    if (file) {
-      setUploadForm({ ...uploadForm, file: file });
-    }
+    if (file) setUploadForm({ ...uploadForm, file });
   };
 
   const processUploadedData = async () => {
     if (!uploadForm.datasetName || !uploadForm.file) {
-      alert('Please provide dataset name and file');
+      alert('Please provide a dataset name and a CSV file');
       return;
     }
 
+    setUploadStatus({ stage: 'reading', message: 'Reading file…' });
     try {
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        try {
-          const content = e.target.result;
-          const lines = content.split('\n');
-          
-          // Parse CSV data (simplified format)
-          const records = [];
-          let currentRecord = null;
-          
-          for (let i = 1; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (!line) continue;
-            
-            const values = line.split(',');
-            if (values.length >= 12) {
-              currentRecord = {
-                id: `rec${i}`,
-                patientId: values[0] || `P${String(i).padStart(3, '0')}`,
-                timestamp: new Date().toISOString(),
-                heartRate: parseInt(values[1]) || 75,
-                prInterval: parseInt(values[2]) || 160,
-                qrsDuration: parseInt(values[3]) || 90,
-                qtInterval: parseInt(values[4]) || 380,
-                leads: Array(12).fill(null).map(() => {
-                  return Array(500).fill(0).map(() => Math.sin(Math.random() * 10) * 0.5 + Math.random() * 0.1);
-                }),
-                autoAnalysis: values[5] || 'Automatic analysis pending',
-                leadNames: ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6']
-              };
-              records.push(currentRecord);
-            }
-          }
+      const text = await uploadForm.file.text();
 
-          if (records.length === 0) {
-            alert('No valid records found in file');
-            return;
-          }
+      setUploadStatus({ stage: 'parsing', message: 'Parsing ECG records…' });
+      const { records, errors } = parseEcgCsv(text);
 
-          const newDatasetId = `dataset${Date.now()}`;
-          const newDataset = {
-            id: newDatasetId,
-            name: uploadForm.datasetName,
-            description: uploadForm.description,
-            uploadedBy: currentUser.username,
-            uploadDate: new Date().toISOString().split('T')[0],
-            records: records
-          };
+      setUploadStatus({ stage: 'creating', message: 'Creating dataset…' });
+      const dataset = await datasetService.createDataset(
+        { name: uploadForm.datasetName, description: uploadForm.description },
+        currentUser.id
+      );
 
-          const newDatasets = { ...datasets, [newDatasetId]: newDataset };
-          setDatasets(newDatasets);
-          await saveData('datasets', newDatasets);
-          
-          alert(`Successfully uploaded ${records.length} records!`);
-          setUploadForm({ datasetName: '', description: '', file: null });
-          setView('dashboard');
-        } catch (error) {
-          console.error('Error parsing file:', error);
-          alert('Error parsing file. Please check format.');
-        }
-      };
-      
-      reader.readAsText(uploadForm.file);
-    } catch (error) {
-      console.error('Error reading file:', error);
-      alert('Error reading file');
+      const results = await ecgService.batchUploadRecords(dataset.id, records, (current, total) => {
+        setUploadStatus({ stage: 'uploading', message: `Uploading records…`, progress: `${current}/${total}` });
+      });
+
+      const succeeded = results.filter(r => r.success).length;
+      const failed = results.length - succeeded;
+
+      setUploadStatus(null);
+      const skippedNote = errors.length > 0 ? ` ${errors.length} row(s) were skipped for invalid data.` : '';
+      const failedNote = failed > 0 ? ` ${failed} record(s) failed to save — check console for details.` : '';
+      alert(`Uploaded ${succeeded} of ${records.length} parsed records to "${uploadForm.datasetName}".${skippedNote}${failedNote}`);
+
+      if (failed > 0) {
+        console.error('Records that failed to upload:', results.filter(r => !r.success));
+      }
+
+      setUploadForm({ datasetName: '', description: '', file: null });
+      setView('dashboard');
+    } catch (err) {
+      console.error('Upload failed:', err);
+      setUploadStatus(null);
+      alert(`Upload failed: ${err.message}`);
     }
   };
 
-  const handleDatasetSelect = (datasetId) => {
-    setCurrentDataset(datasetId);
-    const userAnnotations = annotations[currentUser.username] || {};
-    const datasetAnnotations = userAnnotations[datasetId] || {};
-    const recordIds = Object.keys(datasetAnnotations);
-    if (recordIds.length > 0) {
-      const lastIndex = datasets[datasetId].records.findIndex(r => r.id === recordIds[recordIds.length - 1]);
-      setCurrentRecordIndex(lastIndex + 1 < datasets[datasetId].records.length ? lastIndex + 1 : 0);
-    } else {
-      setCurrentRecordIndex(0);
+  // ---------------------------------------------------------------------
+  // Dataset / annotation navigation
+  // ---------------------------------------------------------------------
+  const handleDatasetSelect = async (datasetId) => {
+    try {
+      const records = await ecgService.getRecords(datasetId);
+      if (records.length === 0) {
+        alert('This dataset has no records yet.');
+        return;
+      }
+      setCurrentDataset(datasetId);
+      setCurrentDatasetRecords(records);
+
+      const doneCount = userAnnotationCounts[datasetId] || 0;
+      setCurrentRecordIndex(Math.min(doneCount, records.length - 1));
+      setReviewMode(false);
+      setView('annotate');
+    } catch (err) {
+      console.error('Failed to open dataset:', err);
+      alert('Could not load this dataset.');
     }
-    setReviewMode(false);
-    setView('annotate');
   };
 
   const handleAnnotate = async (status) => {
-    const record = datasets[currentDataset].records[currentRecordIndex];
-    const newAnnotations = {
-      ...annotations,
-      [currentUser.username]: {
-        ...(annotations[currentUser.username] || {}),
-        [currentDataset]: {
-          ...((annotations[currentUser.username] || {})[currentDataset] || {}),
-          [record.id]: {
-            text: annotationText,
-            status: status,
-            timestamp: new Date().toISOString(),
-            annotatorRole: currentUser.role,
-            hospitalName: currentUser.hospitalName
-          }
-        }
+    const record = currentDatasetRecords[currentRecordIndex];
+    try {
+      await annotationService.saveAnnotation(record.id, currentUser.id, {
+        diagnosis: annotationText,
+        status,
+        findings: null,
+        confidenceScore: null
+      });
+
+      if (currentRecordIndex < currentDatasetRecords.length - 1) {
+        setCurrentRecordIndex(currentRecordIndex + 1);
+      } else {
+        alert('All records in this dataset have been annotated!');
       }
-    };
-    setAnnotations(newAnnotations);
-    await saveData('annotations', newAnnotations);
-    setAnnotationText('');
-    
-    if (currentRecordIndex < datasets[currentDataset].records.length - 1) {
-      setCurrentRecordIndex(currentRecordIndex + 1);
-    } else {
-      alert('All records annotated!');
+    } catch (err) {
+      console.error('Failed to save annotation:', err);
+      alert(`Could not save annotation: ${err.message}`);
     }
   };
 
@@ -285,20 +344,13 @@ const ECGAnnotationPlatform = () => {
     if (visibleLeads.includes(leadIndex)) {
       setVisibleLeads(visibleLeads.filter(l => l !== leadIndex));
     } else {
-      setVisibleLeads([...visibleLeads, leadIndex].sort());
+      setVisibleLeads([...visibleLeads, leadIndex].sort((a, b) => a - b));
     }
   };
 
-  const getAllAnnotators = () => {
-    const annotators = new Set();
-    Object.keys(annotations).forEach(username => {
-      if (annotations[username][currentDataset]) {
-        annotators.add(username);
-      }
-    });
-    return Array.from(annotators);
-  };
-
+  // ---------------------------------------------------------------------
+  // Render: Login / Register
+  // ---------------------------------------------------------------------
   const renderLogin = () => (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full">
@@ -307,42 +359,40 @@ const ECGAnnotationPlatform = () => {
           <h1 className="text-3xl font-bold text-gray-800">LabelECG</h1>
         </div>
         <p className="text-center text-gray-600 mb-6">Distributed ECG Annotation Platform</p>
-        
+
+        {authError && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">{authError}</div>
+        )}
+
         <div className="space-y-4">
           <input
-            type="text"
-            placeholder="Username"
+            type="email"
+            placeholder="Email"
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={loginForm.username}
-            onChange={(e) => setLoginForm({...loginForm, username: e.target.value})}
+            value={loginForm.email}
+            onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })}
           />
           <input
             type="password"
             placeholder="Password"
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={loginForm.password}
-            onChange={(e) => setLoginForm({...loginForm, password: e.target.value})}
+            onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
             onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
           />
           <button
             onClick={handleLogin}
-            className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-semibold"
+            disabled={authBusy}
+            className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-semibold disabled:opacity-60"
           >
-            Login
+            {authBusy ? 'Signing in…' : 'Login'}
           </button>
           <button
-            onClick={() => setView('register')}
+            onClick={() => { setAuthError(''); setView('register'); }}
             className="w-full bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition font-semibold"
           >
             Register New Account
           </button>
-        </div>
-        
-        <div className="mt-6 text-sm text-gray-500">
-          <p className="font-semibold mb-2">Demo Accounts:</p>
-          <p>Admin: admin/admin123</p>
-          <p>Expert: doctor1/doc123 | doctor2/doc456</p>
-          <p>Annotator: tech1/tech123 | tech2/tech456</p>
         </div>
       </div>
     </div>
@@ -352,66 +402,75 @@ const ECGAnnotationPlatform = () => {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
       <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full">
         <h2 className="text-2xl font-bold text-gray-800 mb-6">Register New Account</h2>
-        
+
+        {authError && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">{authError}</div>
+        )}
+
         <div className="space-y-4">
           <input
             type="text"
             placeholder="Username"
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={registerForm.username}
-            onChange={(e) => setRegisterForm({...registerForm, username: e.target.value})}
+            onChange={(e) => setRegisterForm({ ...registerForm, username: e.target.value })}
+          />
+          <input
+            type="email"
+            placeholder="Email"
+            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            value={registerForm.email}
+            onChange={(e) => setRegisterForm({ ...registerForm, email: e.target.value })}
           />
           <input
             type="password"
-            placeholder="Password"
+            placeholder="Password (min 6 characters)"
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={registerForm.password}
-            onChange={(e) => setRegisterForm({...registerForm, password: e.target.value})}
+            onChange={(e) => setRegisterForm({ ...registerForm, password: e.target.value })}
           />
           <input
             type="text"
             placeholder="Hospital/Institution Name"
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={registerForm.hospitalName}
-            onChange={(e) => setRegisterForm({...registerForm, hospitalName: e.target.value})}
+            onChange={(e) => setRegisterForm({ ...registerForm, hospitalName: e.target.value })}
           />
           <select
             className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={registerForm.role}
-            onChange={(e) => setRegisterForm({...registerForm, role: e.target.value})}
+            onChange={(e) => setRegisterForm({ ...registerForm, role: e.target.value })}
           >
             <option value="annotator">Annotator (Technician)</option>
             <option value="expert">Expert (Physician)</option>
             <option value="admin">Administrator</option>
           </select>
-          <input
-            type="text"
-            placeholder="Verification Code"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={registerForm.verificationCode}
-            onChange={(e) => setRegisterForm({...registerForm, verificationCode: e.target.value})}
-          />
           <button
             onClick={handleRegister}
-            className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-semibold"
+            disabled={authBusy}
+            className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-semibold disabled:opacity-60"
           >
-            Register
+            {authBusy ? 'Registering…' : 'Register'}
           </button>
           <button
-            onClick={() => setView('login')}
+            onClick={() => { setAuthError(''); setView('login'); }}
             className="w-full bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition font-semibold"
           >
             Back to Login
           </button>
         </div>
-        
-        <div className="mt-4 text-sm text-gray-500 text-center">
-          <p>Verification code: VERIFY2024</p>
-        </div>
+
+        <p className="mt-4 text-xs text-gray-500 text-center">
+          Role is self-selected at signup for simplicity. If you need to restrict who can register as
+          expert/admin, enforce that with a Supabase RLS policy or an approval step — see README.
+        </p>
       </div>
     </div>
   );
 
+  // ---------------------------------------------------------------------
+  // Render: Dashboard
+  // ---------------------------------------------------------------------
   const renderDashboard = () => (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-md px-6 py-4">
@@ -422,41 +481,39 @@ const ECGAnnotationPlatform = () => {
           </div>
           <div className="flex items-center gap-4">
             <span className="text-gray-600">{currentUser.username} ({currentUser.role})</span>
-            <span className="text-sm text-gray-500">{currentUser.hospitalName}</span>
+            <span className="text-sm text-gray-500">{currentUser.hospital_name}</span>
             <button onClick={() => setView('account')} className="p-2 hover:bg-gray-100 rounded-lg">
               <Settings size={20} />
             </button>
-            <button onClick={() => { setCurrentUser(null); setView('login'); }} className="p-2 hover:bg-gray-100 rounded-lg">
+            <button onClick={handleLogout} className="p-2 hover:bg-gray-100 rounded-lg">
               <LogOut size={20} />
             </button>
           </div>
         </div>
       </nav>
-      
+
       <div className="max-w-7xl mx-auto p-6">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <div className="bg-white rounded-lg shadow-md p-6">
             <div className="flex items-center justify-between mb-4">
               <Database className="text-blue-500" size={32} />
-              <span className="text-3xl font-bold text-gray-800">{Object.keys(datasets).length}</span>
+              <span className="text-3xl font-bold text-gray-800">{platformStats.totalDatasets}</span>
             </div>
             <h3 className="text-gray-600 font-semibold">Total Datasets</h3>
           </div>
-          
+
           <div className="bg-white rounded-lg shadow-md p-6">
             <div className="flex items-center justify-between mb-4">
               <FileText className="text-green-500" size={32} />
-              <span className="text-3xl font-bold text-gray-800">
-                {Object.values(datasets).reduce((sum, ds) => sum + ds.records.length, 0)}
-              </span>
+              <span className="text-3xl font-bold text-gray-800">{platformStats.totalRecords}</span>
             </div>
             <h3 className="text-gray-600 font-semibold">Total ECG Records</h3>
           </div>
-          
+
           <div className="bg-white rounded-lg shadow-md p-6">
             <div className="flex items-center justify-between mb-4">
               <Users className="text-purple-500" size={32} />
-              <span className="text-3xl font-bold text-gray-800">{Object.keys(users).length}</span>
+              <span className="text-3xl font-bold text-gray-800">{platformStats.totalUsers}</span>
             </div>
             <h3 className="text-gray-600 font-semibold">Registered Users</h3>
           </div>
@@ -465,25 +522,25 @@ const ECGAnnotationPlatform = () => {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
           <button
             onClick={() => setView('datasets')}
-            className="bg-blue-600 text-white rounded-lg p-6 hover:bg-blue-700 transition shadow-md"
+            className="bg-blue-600 text-white rounded-lg p-6 hover:bg-blue-700 transition shadow-md text-left"
           >
             <Eye className="mb-2" size={32} />
             <h3 className="text-xl font-semibold">View & Annotate</h3>
             <p className="text-sm opacity-90 mt-2">Browse datasets and annotate ECG records</p>
           </button>
-          
+
           <button
             onClick={() => setView('upload')}
-            className="bg-green-600 text-white rounded-lg p-6 hover:bg-green-700 transition shadow-md"
+            className="bg-green-600 text-white rounded-lg p-6 hover:bg-green-700 transition shadow-md text-left"
           >
             <Upload className="mb-2" size={32} />
             <h3 className="text-xl font-semibold">Upload Data</h3>
             <p className="text-sm opacity-90 mt-2">Upload new ECG datasets for annotation</p>
           </button>
-          
+
           <button
             onClick={() => setView('review')}
-            className="bg-purple-600 text-white rounded-lg p-6 hover:bg-purple-700 transition shadow-md"
+            className="bg-purple-600 text-white rounded-lg p-6 hover:bg-purple-700 transition shadow-md text-left"
           >
             <CheckCircle className="mb-2" size={32} />
             <h3 className="text-xl font-semibold">Review Annotations</h3>
@@ -493,24 +550,32 @@ const ECGAnnotationPlatform = () => {
 
         <div className="bg-white rounded-lg shadow-md p-6">
           <h3 className="text-xl font-semibold text-gray-800 mb-4">Recent Activity</h3>
-          <div className="space-y-3">
-            {Object.entries(annotations).slice(0, 5).map(([username, userAnns], idx) => (
-              <div key={idx} className="flex items-center justify-between py-2 border-b border-gray-100">
-                <div className="flex items-center gap-3">
-                  <User className="text-gray-400" size={20} />
-                  <span className="text-gray-700">{username}</span>
+          {recentActivity.length === 0 ? (
+            <p className="text-gray-400 text-sm">No annotations yet.</p>
+          ) : (
+            <div className="space-y-3">
+              {recentActivity.map((a) => (
+                <div key={a.id} className="flex items-center justify-between py-2 border-b border-gray-100">
+                  <div className="flex items-center gap-3">
+                    <User className="text-gray-400" size={20} />
+                    <span className="text-gray-700">{a.annotator?.username}</span>
+                    <span className="text-sm text-gray-400">
+                      {a.ecg_record?.dataset?.name} · {a.ecg_record?.patient_id}
+                    </span>
+                  </div>
+                  <span className="text-sm text-gray-500">{new Date(a.created_at).toLocaleString()}</span>
                 </div>
-                <span className="text-sm text-gray-500">
-                  {Object.values(userAnns).reduce((sum, ds) => sum + Object.keys(ds).length, 0)} annotations
-                </span>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
 
+  // ---------------------------------------------------------------------
+  // Render: Upload
+  // ---------------------------------------------------------------------
   const renderUpload = () => (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-md px-6 py-4">
@@ -524,14 +589,14 @@ const ECGAnnotationPlatform = () => {
           </button>
         </div>
       </nav>
-      
+
       <div className="max-w-3xl mx-auto p-6">
         <div className="bg-white rounded-lg shadow-md p-8">
           <div className="mb-6">
             <h2 className="text-xl font-semibold text-gray-800 mb-2">Upload New Dataset</h2>
-            <p className="text-gray-600">Upload ECG data in CSV format for collaborative annotation</p>
+            <p className="text-gray-600">Upload real 12-lead ECG data in CSV format for collaborative annotation.</p>
           </div>
-          
+
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Dataset Name *</label>
@@ -540,10 +605,10 @@ const ECGAnnotationPlatform = () => {
                 placeholder="e.g., Hospital A - Cardiology Department"
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 value={uploadForm.datasetName}
-                onChange={(e) => setUploadForm({...uploadForm, datasetName: e.target.value})}
+                onChange={(e) => setUploadForm({ ...uploadForm, datasetName: e.target.value })}
               />
             </div>
-            
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
               <textarea
@@ -551,10 +616,10 @@ const ECGAnnotationPlatform = () => {
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 rows="3"
                 value={uploadForm.description}
-                onChange={(e) => setUploadForm({...uploadForm, description: e.target.value})}
+                onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
               />
             </div>
-            
+
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">ECG Data File (CSV) *</label>
               <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
@@ -577,16 +642,33 @@ const ECGAnnotationPlatform = () => {
                 </label>
               </div>
               <p className="text-sm text-gray-500 mt-2">
-                Format: PatientID, HeartRate, PR, QRS, QT, AutoAnalysis
+                Required columns: patient_id, timestamp, heart_rate, pr_interval, qrs_duration, qt_interval,
+                sampling_rate, auto_analysis, lead_I, lead_II, lead_III, lead_aVR, lead_aVL, lead_aVF, lead_V1–V6.
+                Each lead column holds that lead's real sample values separated by semicolons.
               </p>
+              <a
+                href="/sample-ecg-template.csv"
+                download
+                className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-700 mt-2"
+              >
+                <Download size={14} /> Download CSV header template
+              </a>
             </div>
-            
+
+            {uploadStatus && (
+              <div className="p-3 bg-blue-50 border border-blue-200 text-blue-700 text-sm rounded-lg flex items-center gap-2">
+                <Loader2 className="animate-spin" size={16} />
+                {uploadStatus.message} {uploadStatus.progress}
+              </div>
+            )}
+
             <div className="flex gap-4 mt-6">
               <button
                 onClick={processUploadedData}
-                className="flex-1 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 transition font-semibold"
+                disabled={!!uploadStatus}
+                className="flex-1 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 transition font-semibold disabled:opacity-60"
               >
-                Upload Dataset
+                {uploadStatus ? 'Uploading…' : 'Upload Dataset'}
               </button>
               <button
                 onClick={() => setView('dashboard')}
@@ -601,6 +683,9 @@ const ECGAnnotationPlatform = () => {
     </div>
   );
 
+  // ---------------------------------------------------------------------
+  // Render: Dataset browser
+  // ---------------------------------------------------------------------
   const renderDatasets = () => (
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white shadow-md px-6 py-4">
@@ -614,60 +699,70 @@ const ECGAnnotationPlatform = () => {
           </button>
         </div>
       </nav>
-      
+
       <div className="max-w-7xl mx-auto p-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {Object.values(datasets).map(dataset => {
-            const userAnnotationCount = ((annotations[currentUser.username] || {})[dataset.id] || {});
-            const annotatedCount = Object.keys(userAnnotationCount).length;
-            const totalCount = dataset.records.length;
-            const progress = (annotatedCount / totalCount) * 100;
-            
-            return (
-              <div key={dataset.id} className="bg-white rounded-lg shadow-md hover:shadow-lg transition">
-                <div className="p-6">
-                  <h3 className="text-lg font-semibold text-gray-800 mb-2">{dataset.name}</h3>
-                  <p className="text-sm text-gray-600 mb-4">{dataset.description}</p>
-                  
-                  <div className="space-y-2 text-sm text-gray-500 mb-4">
-                    <p><span className="font-medium">Records:</span> {dataset.records.length}</p>
-                    <p><span className="font-medium">Uploaded by:</span> {dataset.uploadedBy}</p>
-                    <p><span className="font-medium">Date:</span> {dataset.uploadDate}</p>
-                  </div>
-                  
-                  <div className="mb-4">
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-gray-600">Your Progress</span>
-                      <span className="text-gray-600">{annotatedCount}/{totalCount}</span>
+        {datasets.length === 0 ? (
+          <div className="bg-white rounded-lg shadow-md p-8 text-center text-gray-500">
+            No datasets yet. <button onClick={() => setView('upload')} className="text-blue-600 hover:underline">Upload one</button> to get started.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {datasets.map(dataset => {
+              const annotatedCount = userAnnotationCounts[dataset.id] || 0;
+              const totalCount = dataset.record_count || 0;
+              const progress = totalCount > 0 ? (annotatedCount / totalCount) * 100 : 0;
+
+              return (
+                <div key={dataset.id} className="bg-white rounded-lg shadow-md hover:shadow-lg transition">
+                  <div className="p-6">
+                    <h3 className="text-lg font-semibold text-gray-800 mb-2">{dataset.name}</h3>
+                    <p className="text-sm text-gray-600 mb-4">{dataset.description}</p>
+
+                    <div className="space-y-2 text-sm text-gray-500 mb-4">
+                      <p><span className="font-medium">Records:</span> {totalCount}</p>
+                      <p><span className="font-medium">Uploaded by:</span> {dataset.users?.username || 'Unknown'}</p>
+                      <p><span className="font-medium">Date:</span> {new Date(dataset.created_at).toLocaleDateString()}</p>
                     </div>
-                    <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div 
-                        className="bg-blue-600 h-2 rounded-full transition-all" 
-                        style={{width: `${progress}%`}}
-                      />
+
+                    <div className="mb-4">
+                      <div className="flex justify-between text-sm mb-1">
+                        <span className="text-gray-600">Your Progress</span>
+                        <span className="text-gray-600">{annotatedCount}/{totalCount}</span>
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div
+                          className="bg-blue-600 h-2 rounded-full transition-all"
+                          style={{ width: `${progress}%` }}
+                        />
+                      </div>
                     </div>
+
+                    <button
+                      onClick={() => handleDatasetSelect(dataset.id)}
+                      disabled={totalCount === 0}
+                      className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition font-semibold disabled:opacity-50"
+                    >
+                      Start Annotating →
+                    </button>
                   </div>
-                  
-                  <button
-                    onClick={() => handleDatasetSelect(dataset.id)}
-                    className="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 transition font-semibold"
-                  >
-                    Start Annotating →
-                  </button>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
 
+  // ---------------------------------------------------------------------
+  // Render: Annotate
+  // ---------------------------------------------------------------------
   const renderAnnotate = () => {
-    const record = datasets[currentDataset].records[currentRecordIndex];
-    const userAnnotation = ((annotations[currentUser.username] || {})[currentDataset] || {})[record.id];
-    const allAnnotators = getAllAnnotators();
-    
+    const meta = currentDatasetRecords[currentRecordIndex];
+    const record = currentRecordData;
+
+    if (!meta) return null;
+
     return (
       <div className="min-h-screen bg-gray-50">
         <nav className="bg-white shadow-md px-6 py-4">
@@ -676,7 +771,9 @@ const ECGAnnotationPlatform = () => {
               <button onClick={() => setView('datasets')} className="text-blue-600 hover:text-blue-700">
                 ← Back
               </button>
-              <h1 className="text-xl font-bold text-gray-800">{datasets[currentDataset].name}</h1>
+              <h1 className="text-xl font-bold text-gray-800">
+                {datasets.find(d => d.id === currentDataset)?.name || 'Dataset'}
+              </h1>
             </div>
             <div className="flex items-center gap-4">
               {(currentUser.role === 'expert' || currentUser.role === 'admin') && (
@@ -687,320 +784,315 @@ const ECGAnnotationPlatform = () => {
                   {reviewMode ? 'Annotation Mode' : 'Review Mode'}
                 </button>
               )}
-              <span className="text-gray-600">Record {currentRecordIndex + 1} / {datasets[currentDataset].records.length}</span>
+              <span className="text-gray-600">Record {currentRecordIndex + 1} / {currentDatasetRecords.length}</span>
             </div>
           </div>
         </nav>
-        
+
         <div className="max-w-7xl mx-auto p-6">
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                <Heart size={18} className="text-red-500" />
-                ECG Parameters
-              </h3>
-              <div className="space-y-2 text-sm">
-                <p><span className="font-medium">Patient ID:</span> {record.patientId}</p>
-                <p><span className="font-medium">Heart Rate:</span> {record.heartRate} bpm</p>
-                <p><span className="font-medium">PR Interval:</span> {record.prInterval} ms</p>
-                <p><span className="font-medium">QRS Duration:</span> {record.qrsDuration} ms</p>
-                <p><span className="font-medium">QT Interval:</span> {record.qtInterval} ms</p>
-                <p><span className="font-medium">Time:</span> {new Date(record.timestamp).toLocaleString()}</p>
-              </div>
+          {recordLoading || !record ? (
+            <div className="bg-white rounded-lg shadow p-12 flex items-center justify-center text-gray-500 gap-2">
+              <Loader2 className="animate-spin" size={20} /> Loading ECG waveform…
             </div>
-            
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="font-semibold text-gray-700 mb-3">Automatic Analysis</h3>
-              <p className="text-sm text-gray-600">{record.autoAnalysis}</p>
-            </div>
-            
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="font-semibold text-gray-700 mb-3">Your Annotation</h3>
-              {userAnnotation ? (
-                <div className="text-sm">
-                  <p className="text-gray-600 mb-2">{userAnnotation.text}</p>
-                  <span className={`inline-block px-2 py-1 rounded text-xs ${
-                    userAnnotation.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-                  }`}>
-                    {userAnnotation.status}
-                  </span>
-                  <p className="text-xs text-gray-500 mt-2">{new Date(userAnnotation.timestamp).toLocaleString()}</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-6">
+                <div className="bg-white rounded-lg shadow p-4">
+                  <h3 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                    <Heart size={18} className="text-red-500" />
+                    ECG Parameters
+                  </h3>
+                  <div className="space-y-2 text-sm">
+                    <p><span className="font-medium">Patient ID:</span> {record.patient_id}</p>
+                    <p><span className="font-medium">Heart Rate:</span> {record.heart_rate ?? '—'} bpm</p>
+                    <p><span className="font-medium">PR Interval:</span> {record.pr_interval ?? '—'} ms</p>
+                    <p><span className="font-medium">QRS Duration:</span> {record.qrs_duration ?? '—'} ms</p>
+                    <p><span className="font-medium">QT Interval:</span> {record.qt_interval ?? '—'} ms</p>
+                    <p><span className="font-medium">Time:</span> {new Date(record.timestamp).toLocaleString()}</p>
+                  </div>
                 </div>
-              ) : (
-                <p className="text-sm text-gray-400">Not yet annotated</p>
+
+                <div className="bg-white rounded-lg shadow p-4">
+                  <h3 className="font-semibold text-gray-700 mb-3">Automatic Analysis</h3>
+                  <p className="text-sm text-gray-600">{record.auto_analysis || 'Not provided'}</p>
+                </div>
+
+                <div className="bg-white rounded-lg shadow p-4">
+                  <h3 className="font-semibold text-gray-700 mb-3">Your Annotation</h3>
+                  {userAnnotation ? (
+                    <div className="text-sm">
+                      <p className="text-gray-600 mb-2">{userAnnotation.diagnosis}</p>
+                      <span className={`inline-block px-2 py-1 rounded text-xs ${
+                        userAnnotation.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                      }`}>
+                        {userAnnotation.status}
+                      </span>
+                      <p className="text-xs text-gray-500 mt-2">{new Date(userAnnotation.updated_at || userAnnotation.created_at).toLocaleString()}</p>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-400">Not yet annotated</p>
+                  )}
+                </div>
+
+                <div className="bg-white rounded-lg shadow p-4">
+                  <h3 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                    <Users size={18} className="text-purple-500" />
+                    Team Annotations
+                  </h3>
+                  <div className="space-y-2 text-sm">
+                    {recordAnnotations.length > 0 ? (
+                      recordAnnotations.map(a => (
+                        <div key={a.id} className="flex justify-between items-center">
+                          <span className="text-gray-600">{a.annotator?.username}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded ${
+                            a.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                          }`}>{a.status}</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-gray-400">No annotations yet</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {reviewMode && (currentUser.role === 'expert' || currentUser.role === 'admin') && (
+                <div className="bg-purple-50 border-2 border-purple-200 rounded-lg p-6 mb-6">
+                  <h3 className="font-semibold text-purple-800 mb-4 flex items-center gap-2">
+                    <Eye size={20} />
+                    Review Mode - All Annotations for this Record
+                  </h3>
+                  <div className="space-y-3">
+                    {recordAnnotations.length === 0 && <p className="text-gray-500 text-sm">No annotations yet.</p>}
+                    {recordAnnotations.map(a => (
+                      <div key={a.id} className="bg-white rounded-lg p-4 border border-purple-200">
+                        <div className="flex justify-between items-start mb-2">
+                          <div>
+                            <span className="font-semibold text-gray-800">{a.annotator?.username}</span>
+                            <span className="text-sm text-gray-500 ml-2">({a.annotator?.role})</span>
+                            <p className="text-xs text-gray-500">{a.annotator?.hospital_name}</p>
+                          </div>
+                          <span className={`px-2 py-1 rounded text-xs ${
+                            a.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                          }`}>
+                            {a.status}
+                          </span>
+                        </div>
+                        <p className="text-sm text-gray-700">{a.diagnosis}</p>
+                        <p className="text-xs text-gray-500 mt-2">{new Date(a.updated_at || a.created_at).toLocaleString()}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
-            </div>
-            
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                <Users size={18} className="text-purple-500" />
-                Team Annotations
-              </h3>
-              <div className="space-y-2 text-sm">
-                {allAnnotators.length > 0 ? (
-                  allAnnotators.map(annotator => {
-                    const count = Object.keys(annotations[annotator][currentDataset] || {}).length;
+
+              <div className="bg-white rounded-lg shadow p-6 mb-6">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="font-semibold text-gray-700">Lead Selection</h3>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setVisibleLeads([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])}
+                      className="text-sm px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                    >
+                      Show All
+                    </button>
+                    <button
+                      onClick={() => setVisibleLeads([1, 5, 9])}
+                      className="text-sm px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
+                    >
+                      Key Leads
+                    </button>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {LEAD_NAMES.map((name, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => toggleLead(idx)}
+                      className={`px-3 py-1 rounded text-sm font-medium transition ${
+                        visibleLeads.includes(idx)
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+                      }`}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white rounded-lg shadow p-6 mb-6">
+                <h3 className="font-semibold text-gray-700 mb-4">
+                  ECG Waveforms — 12-Lead Display ({record.samplingRate} Hz, {record.duration?.toFixed(2)}s)
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {visibleLeads.map(leadIdx => {
+                    const leadKey = LEAD_NAMES[leadIdx];
+                    const samples = record.leads[leadKey] || [];
                     return (
-                      <div key={annotator} className="flex justify-between items-center">
-                        <span className="text-gray-600">{annotator}</span>
-                        <span className="text-gray-500">{count} done</span>
+                      <div key={leadIdx} className="border border-gray-200 rounded-lg p-3">
+                        <p className="text-sm font-semibold text-gray-700 mb-2">{leadKey}</p>
+                        <ResponsiveContainer width="100%" height={120}>
+                          <LineChart data={samples.map((value, idx) => ({ x: idx, y: value }))}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
+                            <XAxis dataKey="x" hide />
+                            <YAxis hide />
+                            <Line type="monotone" dataKey="y" stroke="#3b82f6" dot={false} strokeWidth={1.5} isAnimationActive={false} />
+                          </LineChart>
+                        </ResponsiveContainer>
                       </div>
                     );
-                  })
-                ) : (
-                  <p className="text-gray-400">No annotations yet</p>
-                )}
-              </div>
-            </div>
-          </div>
-          
-          {reviewMode && (currentUser.role === 'expert' || currentUser.role === 'admin') && (
-            <div className="bg-purple-50 border-2 border-purple-200 rounded-lg p-6 mb-6">
-              <h3 className="font-semibold text-purple-800 mb-4 flex items-center gap-2">
-                <Eye size={20} />
-                Review Mode - All Annotations for this Record
-              </h3>
-              <div className="space-y-3">
-                {allAnnotators.map(annotator => {
-                  const annotation = annotations[annotator][currentDataset]?.[record.id];
-                  return annotation ? (
-                    <div key={annotator} className="bg-white rounded-lg p-4 border border-purple-200">
-                      <div className="flex justify-between items-start mb-2">
-                        <div>
-                          <span className="font-semibold text-gray-800">{annotator}</span>
-                          <span className="text-sm text-gray-500 ml-2">({annotation.annotatorRole})</span>
-                          <p className="text-xs text-gray-500">{annotation.hospitalName}</p>
-                        </div>
-                        <span className={`px-2 py-1 rounded text-xs ${
-                          annotation.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
-                        }`}>
-                          {annotation.status}
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-700">{annotation.text}</p>
-                      <p className="text-xs text-gray-500 mt-2">{new Date(annotation.timestamp).toLocaleString()}</p>
-                    </div>
-                  ) : null;
-                })}
-              </div>
-            </div>
-          )}
-          
-          <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="font-semibold text-gray-700">Lead Selection</h3>
-              <div className="flex gap-2">
-                <button 
-                  onClick={() => setVisibleLeads([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])}
-                  className="text-sm px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
-                >
-                  Show All
-                </button>
-                <button 
-                  onClick={() => setVisibleLeads([1, 5, 9])}
-                  className="text-sm px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200"
-                >
-                  Key Leads
-                </button>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {record.leadNames.map((name, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => toggleLead(idx)}
-                  className={`px-3 py-1 rounded text-sm font-medium transition ${
-                    visibleLeads.includes(idx)
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-                  }`}
-                >
-                  {name}
-                </button>
-              ))}
-            </div>
-          </div>
-          
-          <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <h3 className="font-semibold text-gray-700 mb-4">ECG Waveforms - 12-Lead Display</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {visibleLeads.map(leadIdx => (
-                <div key={leadIdx} className="border border-gray-200 rounded-lg p-3">
-                  <p className="text-sm font-semibold text-gray-700 mb-2">{record.leadNames[leadIdx]}</p>
-                  <ResponsiveContainer width="100%" height={120}>
-                    <LineChart data={record.leads[leadIdx].map((value, idx) => ({ x: idx, y: value }))}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
-                      <XAxis dataKey="x" hide />
-                      <YAxis domain={[-1.5, 1.5]} hide />
-                      <Line type="monotone" dataKey="y" stroke="#3b82f6" dot={false} strokeWidth={1.5} />
-                    </LineChart>
-                  </ResponsiveContainer>
+                  })}
                 </div>
-              ))}
-            </div>
-          </div>
-          
-          {!reviewMode && (
-            <div className="bg-white rounded-lg shadow p-6">
-              <h3 className="font-semibold text-gray-700 mb-4">Make Annotation</h3>
-              <textarea
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
-                rows="4"
-                placeholder="Enter your diagnosis, observations, and clinical interpretation..."
-                value={annotationText}
-                onChange={(e) => setAnnotationText(e.target.value)}
-              />
-              
-              <div className="flex gap-4 mb-4">
-                <button
-                  onClick={() => handleAnnotate('confirmed')}
-                  className="flex-1 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 transition font-semibold flex items-center justify-center gap-2"
-                >
-                  <CheckCircle size={20} />
-                  Confirm
-                </button>
-                <button
-                  onClick={() => handleAnnotate('unsure')}
-                  className="flex-1 bg-yellow-600 text-white py-3 rounded-lg hover:bg-yellow-700 transition font-semibold flex items-center justify-center gap-2"
-                >
-                  <AlertCircle size={20} />
-                  Mark as Unsure
-                </button>
               </div>
-              
-              <div className="flex justify-between">
-                <button
-                  onClick={() => setCurrentRecordIndex(Math.max(0, currentRecordIndex - 1))}
-                  disabled={currentRecordIndex === 0}
-                  className="flex items-center gap-2 px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                >
-                  <ChevronLeft size={20} />
-                  Previous
-                </button>
-                <button
-                  onClick={() => setCurrentRecordIndex(Math.min(datasets[currentDataset].records.length - 1, currentRecordIndex + 1))}
-                  disabled={currentRecordIndex === datasets[currentDataset].records.length - 1}
-                  className="flex items-center gap-2 px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                >
-                  Next
-                  <ChevronRight size={20} />
-                </button>
-              </div>
-            </div>
+
+              {!reviewMode && (
+                <div className="bg-white rounded-lg shadow p-6">
+                  <h3 className="font-semibold text-gray-700 mb-4">Make Annotation</h3>
+                  <textarea
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+                    rows="4"
+                    placeholder="Enter your diagnosis, observations, and clinical interpretation..."
+                    value={annotationText}
+                    onChange={(e) => setAnnotationText(e.target.value)}
+                  />
+
+                  <div className="flex gap-4 mb-4">
+                    <button
+                      onClick={() => handleAnnotate('confirmed')}
+                      className="flex-1 bg-green-600 text-white py-3 rounded-lg hover:bg-green-700 transition font-semibold flex items-center justify-center gap-2"
+                    >
+                      <CheckCircle size={20} />
+                      Confirm
+                    </button>
+                    <button
+                      onClick={() => handleAnnotate('unsure')}
+                      className="flex-1 bg-yellow-600 text-white py-3 rounded-lg hover:bg-yellow-700 transition font-semibold flex items-center justify-center gap-2"
+                    >
+                      <AlertCircle size={20} />
+                      Mark as Unsure
+                    </button>
+                  </div>
+
+                  <div className="flex justify-between">
+                    <button
+                      onClick={() => setCurrentRecordIndex(Math.max(0, currentRecordIndex - 1))}
+                      disabled={currentRecordIndex === 0}
+                      className="flex items-center gap-2 px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      <ChevronLeft size={20} />
+                      Previous
+                    </button>
+                    <button
+                      onClick={() => setCurrentRecordIndex(Math.min(currentDatasetRecords.length - 1, currentRecordIndex + 1))}
+                      disabled={currentRecordIndex === currentDatasetRecords.length - 1}
+                      className="flex items-center gap-2 px-6 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      Next
+                      <ChevronRight size={20} />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
     );
   };
 
-  const renderReview = () => {
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <nav className="bg-white shadow-md px-6 py-4">
-          <div className="max-w-7xl mx-auto flex justify-between items-center">
-            <div className="flex items-center">
-              <Heart className="text-red-500 mr-2" size={28} />
-              <h1 className="text-2xl font-bold text-gray-800">Review Annotations</h1>
-            </div>
-            <button onClick={() => setView('dashboard')} className="text-blue-600 hover:text-blue-700">
-              ← Back to Dashboard
-            </button>
+  // ---------------------------------------------------------------------
+  // Render: Review
+  // ---------------------------------------------------------------------
+  const renderReview = () => (
+    <div className="min-h-screen bg-gray-50">
+      <nav className="bg-white shadow-md px-6 py-4">
+        <div className="max-w-7xl mx-auto flex justify-between items-center">
+          <div className="flex items-center">
+            <Heart className="text-red-500 mr-2" size={28} />
+            <h1 className="text-2xl font-bold text-gray-800">Review Annotations</h1>
           </div>
-        </nav>
-        
-        <div className="max-w-7xl mx-auto p-6">
-          <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-            <h3 className="text-xl font-semibold text-gray-800 mb-4">Annotation Statistics by User</h3>
-            <div className="space-y-4">
-              {Object.entries(annotations).map(([username, userAnns]) => {
-                const totalAnnotations = Object.values(userAnns).reduce((sum, ds) => sum + Object.keys(ds).length, 0);
-                const user = users[username];
-                
-                return (
-                  <div key={username} className="border-l-4 border-blue-500 pl-4 py-2">
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <span className="font-semibold text-gray-800">{username}</span>
-                        <span className="text-sm text-gray-500 ml-2">({user?.role})</span>
-                        <p className="text-sm text-gray-600">{user?.hospitalName}</p>
-                      </div>
-                      <span className="text-2xl font-bold text-blue-600">{totalAnnotations}</span>
-                    </div>
-                    <div className="mt-2 space-y-1">
-                      {Object.entries(userAnns).map(([datasetId, dsAnns]) => (
-                        <div key={datasetId} className="flex justify-between text-sm text-gray-600">
-                          <span>{datasets[datasetId]?.name}</span>
-                          <span>{Object.keys(dsAnns).length} records</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
+          <button onClick={() => setView('dashboard')} className="text-blue-600 hover:text-blue-700">
+            ← Back to Dashboard
+          </button>
+        </div>
+      </nav>
 
-          <div className="bg-white rounded-lg shadow-md p-6">
-            <h3 className="text-xl font-semibold text-gray-800 mb-4">Dataset Coverage</h3>
-            <div className="space-y-6">
-              {Object.values(datasets).map(dataset => {
-                const annotators = new Set();
-                const recordCoverage = {};
-                
-                Object.entries(annotations).forEach(([username, userAnns]) => {
-                  if (userAnns[dataset.id]) {
-                    annotators.add(username);
-                    Object.keys(userAnns[dataset.id]).forEach(recordId => {
-                      recordCoverage[recordId] = (recordCoverage[recordId] || 0) + 1;
-                    });
-                  }
-                });
-                
-                const totalRecords = dataset.records.length;
-                const annotatedRecords = Object.keys(recordCoverage).length;
-                const coverage = (annotatedRecords / totalRecords) * 100;
-                
+      <div className="max-w-7xl mx-auto p-6">
+        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
+          <h3 className="text-xl font-semibold text-gray-800 mb-4">Coverage by Dataset</h3>
+          {reviewLoading ? (
+            <div className="flex items-center gap-2 text-gray-500 py-8 justify-center">
+              <Loader2 className="animate-spin" size={20} /> Loading…
+            </div>
+          ) : datasets.length === 0 ? (
+            <p className="text-gray-400 text-sm">No datasets yet.</p>
+          ) : (
+            <div className="space-y-4">
+              {datasets.map(dataset => {
+                const summary = reviewSummaries[dataset.id];
+                const progress = summary?.progress || { total_records: dataset.record_count, annotated_records: 0, coverage: 0 };
+                const annotators = summary?.annotators || [];
+
                 return (
                   <div key={dataset.id} className="border border-gray-200 rounded-lg p-4">
                     <h4 className="font-semibold text-gray-800 mb-3">{dataset.name}</h4>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
                       <div className="text-center">
-                        <p className="text-2xl font-bold text-blue-600">{totalRecords}</p>
+                        <p className="text-2xl font-bold text-blue-600">{progress.total_records}</p>
                         <p className="text-sm text-gray-600">Total Records</p>
                       </div>
                       <div className="text-center">
-                        <p className="text-2xl font-bold text-green-600">{annotatedRecords}</p>
+                        <p className="text-2xl font-bold text-green-600">{progress.annotated_records}</p>
                         <p className="text-sm text-gray-600">Annotated</p>
                       </div>
                       <div className="text-center">
-                        <p className="text-2xl font-bold text-purple-600">{annotators.size}</p>
+                        <p className="text-2xl font-bold text-purple-600">{annotators.length}</p>
                         <p className="text-sm text-gray-600">Annotators</p>
                       </div>
                       <div className="text-center">
-                        <p className="text-2xl font-bold text-orange-600">{Math.round(coverage)}%</p>
+                        <p className="text-2xl font-bold text-orange-600">{Math.round(progress.coverage || 0)}%</p>
                         <p className="text-sm text-gray-600">Coverage</p>
                       </div>
                     </div>
-                    <div className="w-full bg-gray-200 rounded-full h-3">
-                      <div 
-                        className="bg-green-600 h-3 rounded-full transition-all" 
-                        style={{width: `${coverage}%`}}
+                    <div className="w-full bg-gray-200 rounded-full h-3 mb-3">
+                      <div
+                        className="bg-green-600 h-3 rounded-full transition-all"
+                        style={{ width: `${progress.coverage || 0}%` }}
                       />
                     </div>
+                    {annotators.length > 0 && (
+                      <div className="flex flex-wrap gap-3 text-sm text-gray-600">
+                        {annotators.map(a => (
+                          <span key={a.annotator_id} className="bg-gray-100 px-3 py-1 rounded-full">
+                            {a.username}: {a.annotated_count}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
-          </div>
+          )}
         </div>
       </div>
-    );
-  };
+    </div>
+  );
 
+  // ---------------------------------------------------------------------
+  // Render: Account
+  // ---------------------------------------------------------------------
   const renderAccount = () => {
-    const userAnnotations = annotations[currentUser.username] || {};
-    const totalAnnotations = Object.values(userAnnotations).reduce((sum, ds) => sum + Object.keys(ds).length, 0);
-    
+    const grouped = {};
+    accountAnnotations.forEach(a => {
+      const dsId = a.ecg_record?.dataset?.id;
+      const dsName = a.ecg_record?.dataset?.name;
+      if (!dsId) return;
+      if (!grouped[dsId]) grouped[dsId] = { name: dsName, items: [] };
+      grouped[dsId].items.push(a);
+    });
+
     return (
       <div className="min-h-screen bg-gray-50">
         <nav className="bg-white shadow-md px-6 py-4">
@@ -1014,7 +1106,7 @@ const ECGAnnotationPlatform = () => {
             </button>
           </div>
         </nav>
-        
+
         <div className="max-w-6xl mx-auto p-6">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
             <div className="bg-white rounded-lg shadow p-6">
@@ -1030,41 +1122,41 @@ const ECGAnnotationPlatform = () => {
                 </div>
                 <div>
                   <p className="text-sm text-gray-500">Institution</p>
-                  <p className="font-medium text-gray-800">{currentUser.hospitalName}</p>
+                  <p className="font-medium text-gray-800">{currentUser.hospital_name}</p>
                 </div>
               </div>
             </div>
-            
+
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-4">Annotation Stats</h3>
               <div className="text-center">
-                <p className="text-5xl font-bold text-blue-600 mb-2">{totalAnnotations}</p>
+                <p className="text-5xl font-bold text-blue-600 mb-2">{accountStats?.total_annotations ?? 0}</p>
                 <p className="text-gray-600">Total Annotations</p>
               </div>
             </div>
-            
+
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-4">Datasets Worked On</h3>
               <div className="text-center">
-                <p className="text-5xl font-bold text-green-600 mb-2">{Object.keys(userAnnotations).length}</p>
+                <p className="text-5xl font-bold text-green-600 mb-2">{accountStats?.datasets_worked_on ?? 0}</p>
                 <p className="text-gray-600">Datasets</p>
               </div>
             </div>
           </div>
-          
+
           <div className="bg-white rounded-lg shadow p-6">
             <h3 className="text-xl font-semibold text-gray-800 mb-4">My Annotation History</h3>
-            
-            {Object.keys(userAnnotations).length === 0 ? (
+
+            {Object.keys(grouped).length === 0 ? (
               <p className="text-gray-500 text-center py-8">No annotations yet. Start annotating from the dashboard!</p>
             ) : (
               <div className="space-y-6">
-                {Object.entries(userAnnotations).map(([datasetId, datasetAnnotations]) => (
+                {Object.entries(grouped).map(([datasetId, group]) => (
                   <div key={datasetId} className="border-l-4 border-blue-500 pl-4">
                     <div className="flex justify-between items-start mb-3">
                       <div>
-                        <h4 className="font-semibold text-gray-700 text-lg">{datasets[datasetId]?.name}</h4>
-                        <p className="text-sm text-gray-500">{Object.keys(datasetAnnotations).length} records annotated</p>
+                        <h4 className="font-semibold text-gray-700 text-lg">{group.name}</h4>
+                        <p className="text-sm text-gray-500">{group.items.length} records annotated</p>
                       </div>
                       <button
                         onClick={() => handleDatasetSelect(datasetId)}
@@ -1074,18 +1166,18 @@ const ECGAnnotationPlatform = () => {
                       </button>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {Object.entries(datasetAnnotations).map(([recordId, annotation]) => (
-                        <div key={recordId} className="bg-gray-50 p-3 rounded-lg">
+                      {group.items.map((a) => (
+                        <div key={a.id} className="bg-gray-50 p-3 rounded-lg">
                           <div className="flex justify-between items-start mb-2">
-                            <span className="text-sm font-medium text-gray-600">Record: {recordId}</span>
+                            <span className="text-sm font-medium text-gray-600">Patient: {a.ecg_record?.patient_id}</span>
                             <span className={`px-2 py-1 rounded text-xs ${
-                              annotation.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+                              a.status === 'confirmed' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
                             }`}>
-                              {annotation.status}
+                              {a.status}
                             </span>
                           </div>
-                          <p className="text-sm text-gray-700 mb-2">{annotation.text}</p>
-                          <p className="text-xs text-gray-500">{new Date(annotation.timestamp).toLocaleString()}</p>
+                          <p className="text-sm text-gray-700 mb-2">{a.diagnosis}</p>
+                          <p className="text-xs text-gray-500">{new Date(a.updated_at || a.created_at).toLocaleString()}</p>
                         </div>
                       ))}
                     </div>
@@ -1099,7 +1191,16 @@ const ECGAnnotationPlatform = () => {
     );
   };
 
+  // ---------------------------------------------------------------------
   // Main render
+  // ---------------------------------------------------------------------
+  if (!authChecked || view === 'loading') {
+    return (
+      <div className="min-h-screen flex items-center justify-center text-gray-500 gap-2">
+        <Loader2 className="animate-spin" size={20} /> Loading…
+      </div>
+    );
+  }
   if (view === 'login') return renderLogin();
   if (view === 'register') return renderRegister();
   if (view === 'dashboard') return renderDashboard();
@@ -1108,7 +1209,7 @@ const ECGAnnotationPlatform = () => {
   if (view === 'annotate') return renderAnnotate();
   if (view === 'review') return renderReview();
   if (view === 'account') return renderAccount();
-  
+
   return null;
 };
 
