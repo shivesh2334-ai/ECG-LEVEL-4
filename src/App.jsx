@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, ChevronRight, Settings, LogOut, Users, Database, FileText, Download, Loader2 } from 'lucide-react';
-import { authService, datasetService, ecgService, annotationService, statsService, missingCredentials } from './lib/supabase';
+import { authService, datasetService, ecgService, annotationService, statsService } from './lib/supabase';
 import { parseEcgCsv } from './lib/ecgFileParser';
 
 const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
@@ -1194,23 +1194,6 @@ const ECGAnnotationPlatform = () => {
   // ---------------------------------------------------------------------
   // Main render
   // ---------------------------------------------------------------------
-  if (missingCredentials) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="max-w-md w-full bg-white rounded-lg shadow p-8 text-center">
-          <Heart className="text-red-500 mx-auto mb-4" size={40} />
-          <h1 className="text-2xl font-bold text-gray-800 mb-2">Configuration Required</h1>
-          <p className="text-gray-600 mb-4">
-            Supabase environment variables are not set. Please configure{' '}
-            <code className="bg-gray-100 px-1 rounded">VITE_SUPABASE_URL</code> and{' '}
-            <code className="bg-gray-100 px-1 rounded">VITE_SUPABASE_ANON_KEY</code> in your
-            deployment environment settings.
-          </p>
-          <p className="text-sm text-gray-400">See <code>.env.example</code> for details.</p>
-        </div>
-      </div>
-    );
-  }
   if (!authChecked || view === 'loading') {
     return (
       <div className="min-h-screen flex items-center justify-center text-gray-500 gap-2">
