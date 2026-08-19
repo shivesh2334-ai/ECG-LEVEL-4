@@ -160,6 +160,15 @@ create policy "users manage their own annotations" on public.annotations
   for insert with check (auth.uid() = annotator_id);
 create policy "users update their own annotations" on public.annotations
   for update using (auth.uid() = annotator_id);
+create policy "experts admins update annotations" on public.annotations
+  for update using (
+    exists (
+      select 1
+      from public.users u
+      where u.id = auth.uid()
+        and u.role in ('expert', 'admin')
+    )
+  );
 
 create policy "authenticated read annotation_history" on public.annotation_history
   for select using (auth.role() = 'authenticated');

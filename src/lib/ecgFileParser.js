@@ -38,9 +38,31 @@ const METADATA_COLUMNS = [
 const EXPECTED_COLUMNS = [...METADATA_COLUMNS, ...REQUIRED_LEAD_COLUMNS]
 
 function parseCsvLine(line) {
-  // Simple CSV split — fields must not contain commas (lead samples use
-  // semicolons as the in-field separator specifically to avoid this).
-  return line.split(',').map(cell => cell.trim())
+  // CSV parser with support for quoted fields and escaped quotes.
+  const cells = []
+  let current = ''
+  let inQuotes = false
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i]
+
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"'
+        i++
+      } else {
+        inQuotes = !inQuotes
+      }
+    } else if (char === ',' && !inQuotes) {
+      cells.push(current.trim())
+      current = ''
+    } else {
+      current += char
+    }
+  }
+
+  cells.push(current.trim())
+  return cells
 }
 
 function parseLeadSamples(cell, columnName, rowNumber) {
