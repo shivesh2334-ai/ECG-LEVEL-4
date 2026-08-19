@@ -159,7 +159,7 @@ create policy "authenticated read annotations" on public.annotations
 create policy "users manage their own annotations" on public.annotations
   for insert with check (auth.uid() = annotator_id);
 create policy "users update their own annotations" on public.annotations
-  for update using (auth.uid() = annotator_id or auth.role() = 'authenticated');
+  for update using (auth.uid() = annotator_id);
 
 create policy "authenticated read annotation_history" on public.annotation_history
   for select using (auth.role() = 'authenticated');
