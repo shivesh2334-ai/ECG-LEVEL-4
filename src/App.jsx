@@ -1,15 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, ChevronRight, Settings, LogOut, Users, Database, FileText, Download, Loader2 } from 'lucide-react';
-import { authService, datasetService, ecgService, annotationService, statsService } from './lib/supabase';
+import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, ChevronRight, Users, Database, FileText, Download, Loader2 } from 'lucide-react';
+import { datasetService, ecgService, annotationService, statsService } from './lib/supabase';
 import { parseEcgCsv } from './lib/ecgFileParser';
 
 const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
 
+const DEFAULT_USER = { username: 'User', role: 'annotator', hospital_name: '', id: null };
+
 const ECGAnnotationPlatform = () => {
-  const [currentUser, setCurrentUser] = useState(null);
-  const [view, setView] = useState('loading');
-  const [authChecked, setAuthChecked] = useState(false);
+  const [currentUser] = useState(DEFAULT_USER);
+  const [view, setView] = useState('dashboard');
 
   // Dashboard / datasets
   const [datasets, setDatasets] = useState([]);
@@ -29,12 +30,6 @@ const ECGAnnotationPlatform = () => {
   const [visibleLeads, setVisibleLeads] = useState([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   const [reviewMode, setReviewMode] = useState(false);
 
-  // Auth forms
-  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
-  const [registerForm, setRegisterForm] = useState({ username: '', email: '', password: '', role: 'annotator', hospitalName: '' });
-  const [authError, setAuthError] = useState('');
-  const [authBusy, setAuthBusy] = useState(false);
-
   // Upload view
   const [uploadForm, setUploadForm] = useState({ datasetName: '', description: '', file: null });
   const [uploadStatus, setUploadStatus] = useState(null); // { stage, message, progress? }
@@ -48,27 +43,8 @@ const ECGAnnotationPlatform = () => {
   const [accountAnnotations, setAccountAnnotations] = useState([]);
 
   // ---------------------------------------------------------------------
-  // Auth bootstrap
+  // Data loading effects
   // ---------------------------------------------------------------------
-  useEffect(() => {
-    (async () => {
-      try {
-        const user = await authService.getCurrentUser();
-        if (user) {
-          setCurrentUser(user);
-          setView('dashboard');
-        } else {
-          setView('login');
-        }
-      } catch (err) {
-        console.error('Session check failed:', err);
-        setView('login');
-      } finally {
-        setAuthChecked(true);
-      }
-    })();
-  }, []);
-
   useEffect(() => {
     if (view === 'dashboard' && currentUser) {
       loadDashboardData();
@@ -187,64 +163,6 @@ const ECGAnnotationPlatform = () => {
   };
 
   // ---------------------------------------------------------------------
-  // Auth actions
-  // ---------------------------------------------------------------------
-  const handleLogin = async () => {
-    setAuthError('');
-    if (!loginForm.email || !loginForm.password) {
-      setAuthError('Enter your email and password');
-      return;
-    }
-    setAuthBusy(true);
-    try {
-      const user = await authService.signIn(loginForm.email, loginForm.password);
-      setCurrentUser(user);
-      setView('dashboard');
-      setLoginForm({ email: '', password: '' });
-    } catch (err) {
-      setAuthError(err.message || 'Login failed');
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const handleRegister = async () => {
-    setAuthError('');
-    if (!registerForm.username || !registerForm.email || !registerForm.password) {
-      setAuthError('Username, email, and password are required');
-      return;
-    }
-    if (registerForm.password.length < 6) {
-      setAuthError('Password must be at least 6 characters');
-      return;
-    }
-    setAuthBusy(true);
-    try {
-      await authService.signUp(registerForm.email, registerForm.password, registerForm);
-      alert('Registration successful! Please check your email to confirm your account, then log in.');
-      setRegisterForm({ username: '', email: '', password: '', role: 'annotator', hospitalName: '' });
-      setView('login');
-    } catch (err) {
-      setAuthError(err.message || 'Registration failed');
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await authService.signOut();
-    } catch (err) {
-      console.error('Sign out failed:', err);
-    }
-    setCurrentUser(null);
-    setCurrentDataset(null);
-    setCurrentDatasetRecords([]);
-    setCurrentRecordData(null);
-    setView('login');
-  };
-
-  // ---------------------------------------------------------------------
   // Upload (real ECG data only — see src/lib/ecgFileParser.js)
   // ---------------------------------------------------------------------
   const handleFileUpload = (event) => {
@@ -349,126 +267,6 @@ const ECGAnnotationPlatform = () => {
   };
 
   // ---------------------------------------------------------------------
-  // Render: Login / Register
-  // ---------------------------------------------------------------------
-  const renderLogin = () => (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full">
-        <div className="flex items-center justify-center mb-6">
-          <Heart className="text-red-500 mr-2" size={32} />
-          <h1 className="text-3xl font-bold text-gray-800">LabelECG</h1>
-        </div>
-        <p className="text-center text-gray-600 mb-6">Distributed ECG Annotation Platform</p>
-
-        {authError && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">{authError}</div>
-        )}
-
-        <div className="space-y-4">
-          <input
-            type="email"
-            placeholder="Email"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={loginForm.email}
-            onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })}
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={loginForm.password}
-            onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
-            onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
-          />
-          <button
-            onClick={handleLogin}
-            disabled={authBusy}
-            className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-semibold disabled:opacity-60"
-          >
-            {authBusy ? 'Signing in…' : 'Login'}
-          </button>
-          <button
-            onClick={() => { setAuthError(''); setView('register'); }}
-            className="w-full bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition font-semibold"
-          >
-            Register New Account
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderRegister = () => (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full">
-        <h2 className="text-2xl font-bold text-gray-800 mb-6">Register New Account</h2>
-
-        {authError && (
-          <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">{authError}</div>
-        )}
-
-        <div className="space-y-4">
-          <input
-            type="text"
-            placeholder="Username"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={registerForm.username}
-            onChange={(e) => setRegisterForm({ ...registerForm, username: e.target.value })}
-          />
-          <input
-            type="email"
-            placeholder="Email"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={registerForm.email}
-            onChange={(e) => setRegisterForm({ ...registerForm, email: e.target.value })}
-          />
-          <input
-            type="password"
-            placeholder="Password (min 6 characters)"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={registerForm.password}
-            onChange={(e) => setRegisterForm({ ...registerForm, password: e.target.value })}
-          />
-          <input
-            type="text"
-            placeholder="Hospital/Institution Name"
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={registerForm.hospitalName}
-            onChange={(e) => setRegisterForm({ ...registerForm, hospitalName: e.target.value })}
-          />
-          <select
-            className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={registerForm.role}
-            onChange={(e) => setRegisterForm({ ...registerForm, role: e.target.value })}
-          >
-            <option value="annotator">Annotator (Technician)</option>
-            <option value="expert">Expert (Physician)</option>
-            <option value="admin">Administrator</option>
-          </select>
-          <button
-            onClick={handleRegister}
-            disabled={authBusy}
-            className="w-full bg-blue-600 text-white py-3 rounded-lg hover:bg-blue-700 transition font-semibold disabled:opacity-60"
-          >
-            {authBusy ? 'Registering…' : 'Register'}
-          </button>
-          <button
-            onClick={() => { setAuthError(''); setView('login'); }}
-            className="w-full bg-gray-200 text-gray-700 py-3 rounded-lg hover:bg-gray-300 transition font-semibold"
-          >
-            Back to Login
-          </button>
-        </div>
-
-        <p className="mt-4 text-xs text-gray-500 text-center">
-          Role is self-selected at signup for simplicity. If you need to restrict who can register as
-          expert/admin, enforce that with a Supabase RLS policy or an approval step — see README.
-        </p>
-      </div>
-    </div>
-  );
-
-  // ---------------------------------------------------------------------
   // Render: Dashboard
   // ---------------------------------------------------------------------
   const renderDashboard = () => (
@@ -481,13 +279,6 @@ const ECGAnnotationPlatform = () => {
           </div>
           <div className="flex items-center gap-4">
             <span className="text-gray-600">{currentUser.username} ({currentUser.role})</span>
-            <span className="text-sm text-gray-500">{currentUser.hospital_name}</span>
-            <button onClick={() => setView('account')} className="p-2 hover:bg-gray-100 rounded-lg">
-              <Settings size={20} />
-            </button>
-            <button onClick={handleLogout} className="p-2 hover:bg-gray-100 rounded-lg">
-              <LogOut size={20} />
-            </button>
           </div>
         </div>
       </nav>
@@ -1194,15 +985,6 @@ const ECGAnnotationPlatform = () => {
   // ---------------------------------------------------------------------
   // Main render
   // ---------------------------------------------------------------------
-  if (!authChecked || view === 'loading') {
-    return (
-      <div className="min-h-screen flex items-center justify-center text-gray-500 gap-2">
-        <Loader2 className="animate-spin" size={20} /> Loading…
-      </div>
-    );
-  }
-  if (view === 'login') return renderLogin();
-  if (view === 'register') return renderRegister();
   if (view === 'dashboard') return renderDashboard();
   if (view === 'upload') return renderUpload();
   if (view === 'datasets') return renderDatasets();
