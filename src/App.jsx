@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, ChevronRight, Users, Database, FileText, Download, Loader2 } from 'lucide-react';
-import { authService, datasetService, ecgService, annotationService, statsService } from './lib/supabase';
+import { supabase, authService, datasetService, ecgService, annotationService, statsService } from './lib/supabase';
 import { parseEcgCsv } from './lib/ecgFileParser';
 import EcgImageAnnotator from './components/EcgImageAnnotator';
 
@@ -12,6 +12,7 @@ const ECGAnnotationPlatform = () => {
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState('signin');
   const [authForm, setAuthForm] = useState({ email: '', password: '', username: '', hospitalName: '' });
+  const [authMessage, setAuthMessage] = useState('');
   const [view, setView] = useState('dashboard');
 
   // Dashboard / datasets
@@ -52,6 +53,10 @@ const ECGAnnotationPlatform = () => {
   // ---------------------------------------------------------------------
   useEffect(() => {
     authService.getCurrentUser().then(setCurrentUser).catch(console.error).finally(() => setAuthLoading(false));
+    const { data: listener } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_IN') authService.getCurrentUser().then(setCurrentUser).catch(console.error);
+    });
+    return () => listener.subscription.unsubscribe();
   }, []);
 
   const submitAuth = async (event) => {
@@ -67,6 +72,23 @@ const ECGAnnotationPlatform = () => {
         setCurrentUser(await authService.signIn(authForm.email, authForm.password));
       }
     } catch (err) { alert(err.message); } finally { setAuthLoading(false); }
+  };
+
+  const sendMagicLink = async () => {
+    if (!authForm.email) {
+      setAuthMessage('Enter your registered email address first.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthMessage('');
+    try {
+      await authService.signInWithMagicLink(authForm.email);
+      setAuthMessage('Check your email and open the secure sign-in link. You can close this page.');
+    } catch (err) {
+      setAuthMessage(err.message);
+    } finally {
+      setAuthLoading(false);
+    }
   };
   useEffect(() => {
     if (view === 'dashboard' && currentUser) {
@@ -1069,6 +1091,12 @@ const ECGAnnotationPlatform = () => {
         <input required type="email" placeholder="Email" value={authForm.email} onChange={(e) => setAuthForm({...authForm, email:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
         <input required minLength="8" type="password" placeholder="Password" value={authForm.password} onChange={(e) => setAuthForm({...authForm, password:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
         <button className="w-full bg-blue-600 text-white rounded-lg py-2.5 font-semibold">{authMode === 'signin' ? 'Sign in' : 'Create annotator account'}</button>
+        {authMode === 'signin' && <>
+          <div className="flex items-center gap-3 text-xs text-gray-400"><span className="h-px bg-gray-200 flex-1" /><span>OR</span><span className="h-px bg-gray-200 flex-1" /></div>
+          <button type="button" onClick={sendMagicLink} className="w-full border border-blue-600 text-blue-700 rounded-lg py-2.5 font-semibold hover:bg-blue-50">Email me a sign-in link</button>
+          <p className="text-xs text-gray-500 text-center">No password required. The link is sent only to an existing account.</p>
+        </>}
+        {authMessage && <p role="status" className="text-sm rounded-lg bg-blue-50 text-blue-800 p-3">{authMessage}</p>}
         <button type="button" onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')} className="w-full text-blue-600 text-sm">{authMode === 'signin' ? 'Create an account' : 'Already registered? Sign in'}</button>
       </form>
     </div>

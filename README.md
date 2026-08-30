@@ -29,6 +29,9 @@ samples lead by lead. Experts/admins retain the existing review workflow.
   progress, account history, CSV import, and waveform displays remain in place.
 - **Working authentication bootstrap.** New accounts are created through
   Supabase Auth and a database trigger creates the matching application profile.
+- **Passwordless email login.** Existing users can select **Email me a sign-in
+  link** and authenticate through a Supabase Magic Link without entering a
+  password. Unknown addresses are not silently registered.
 
 - **Real ECG data only.** All hardcoded demo datasets, demo user accounts,
   and randomly-generated waveform data have been removed. The previous
@@ -66,6 +69,21 @@ samples lead by lead. Experts/admins retain the existing review workflow.
 4. In **Authentication → Providers**, make sure Email sign-up is enabled.
    For local development you may want to disable "Confirm email" so you can
    log in immediately after registering.
+5. In **Authentication → URL Configuration**, set **Site URL** to the deployed
+   application URL. Add the production URL and `http://localhost:5173` to the
+   allowed Redirect URLs as appropriate. Supabase accepts Magic Link callbacks
+   only for allowed destinations.
+
+### Passwordless Magic Link login
+
+On the login screen, enter the email address of an existing account and select
+**Email me a sign-in link**. Open the link delivered by Supabase; the browser
+returns to the app with an authenticated session. For security, the app passes
+`shouldCreateUser: false`, so account registration remains a separate action.
+
+The default Supabase email service is suitable for initial testing but is
+rate-limited. Configure a production SMTP provider under **Authentication →
+Emails/SMTP** before onboarding clinical users.
 
 The default RLS policies are intentionally permissive (any signed-in user
 can read/write most tables) to get you running quickly. Before using this

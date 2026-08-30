@@ -70,6 +70,20 @@ export const authService = {
     return userData
   },
 
+  // Send a passwordless email Magic Link to an existing account.
+  // shouldCreateUser:false keeps registration an explicit, separate action.
+  async signInWithMagicLink(email, redirectTo = window.location.origin) {
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: redirectTo,
+        shouldCreateUser: false
+      }
+    })
+
+    if (error) throw error
+  },
+
   // Sign out
   async signOut() {
     const { error } = await supabase.auth.signOut()
