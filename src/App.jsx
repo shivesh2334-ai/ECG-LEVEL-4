@@ -1,15 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, ChevronRight, Users, Database, FileText, Download, Loader2 } from 'lucide-react';
-import { datasetService, ecgService, annotationService, statsService } from './lib/supabase';
+import { authService, datasetService, ecgService, annotationService, statsService } from './lib/supabase';
 import { parseEcgCsv } from './lib/ecgFileParser';
+import EcgImageAnnotator from './components/EcgImageAnnotator';
 
 const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
 
-const DEFAULT_USER = { username: 'User', role: 'annotator', hospital_name: '', id: null };
-
 const ECGAnnotationPlatform = () => {
-  const [currentUser] = useState(DEFAULT_USER);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState('signin');
+  const [authForm, setAuthForm] = useState({ email: '', password: '', username: '', hospitalName: '' });
   const [view, setView] = useState('dashboard');
 
   // Dashboard / datasets
@@ -27,11 +29,14 @@ const ECGAnnotationPlatform = () => {
   const [userAnnotation, setUserAnnotation] = useState(null);
   const [recordAnnotations, setRecordAnnotations] = useState([]); // all annotators for this record
   const [annotationText, setAnnotationText] = useState('');
+  const [imageMarks, setImageMarks] = useState([]);
+  const [annotationFindings, setAnnotationFindings] = useState('');
+  const [confidenceScore, setConfidenceScore] = useState(80);
   const [visibleLeads, setVisibleLeads] = useState([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
   const [reviewMode, setReviewMode] = useState(false);
 
   // Upload view
-  const [uploadForm, setUploadForm] = useState({ datasetName: '', description: '', file: null });
+  const [uploadForm, setUploadForm] = useState({ datasetName: '', description: '', file: null, files: [], format: 'images' });
   const [uploadStatus, setUploadStatus] = useState(null); // { stage, message, progress? }
 
   // Review view
@@ -45,6 +50,24 @@ const ECGAnnotationPlatform = () => {
   // ---------------------------------------------------------------------
   // Data loading effects
   // ---------------------------------------------------------------------
+  useEffect(() => {
+    authService.getCurrentUser().then(setCurrentUser).catch(console.error).finally(() => setAuthLoading(false));
+  }, []);
+
+  const submitAuth = async (event) => {
+    event.preventDefault();
+    setAuthLoading(true);
+    try {
+      if (authMode === 'signup') {
+        await authService.signUp(authForm.email, authForm.password, { ...authForm, role: 'annotator' });
+        const profile = await authService.getCurrentUser();
+        if (!profile) alert('Account created. Confirm your email, then sign in.');
+        setCurrentUser(profile);
+      } else {
+        setCurrentUser(await authService.signIn(authForm.email, authForm.password));
+      }
+    } catch (err) { alert(err.message); } finally { setAuthLoading(false); }
+  };
   useEffect(() => {
     if (view === 'dashboard' && currentUser) {
       loadDashboardData();
@@ -144,6 +167,7 @@ const ECGAnnotationPlatform = () => {
     if (!meta) return;
     setRecordLoading(true);
     setAnnotationText('');
+    setImageMarks([]);
     try {
       const [full, mine, all] = await Promise.all([
         ecgService.getRecordWithData(meta.id),
@@ -153,6 +177,9 @@ const ECGAnnotationPlatform = () => {
       setCurrentRecordData(full);
       setUserAnnotation(mine);
       setAnnotationText(mine?.diagnosis || '');
+      setAnnotationFindings(mine?.findings || '');
+      setConfidenceScore(mine?.confidence_score ?? 80);
+      setImageMarks(mine?.image_marks || []);
       setRecordAnnotations(all);
     } catch (err) {
       console.error('Failed to load record:', err);
@@ -170,28 +197,43 @@ const ECGAnnotationPlatform = () => {
     if (file) setUploadForm({ ...uploadForm, file });
   };
 
+  const handleImageUpload = (event) => {
+    setUploadForm({ ...uploadForm, files: Array.from(event.target.files || []) });
+  };
+
   const processUploadedData = async () => {
-    if (!uploadForm.datasetName || !uploadForm.file) {
-      alert('Please provide a dataset name and a CSV file');
+    const hasSource = uploadForm.format === 'csv' ? uploadForm.file : uploadForm.files.length > 0;
+    if (!uploadForm.datasetName || !hasSource) {
+      alert(`Please provide a dataset name and ${uploadForm.format === 'csv' ? 'CSV file' : 'one or more ECG images'}`);
       return;
     }
 
     setUploadStatus({ stage: 'reading', message: 'Reading file…' });
     try {
-      const text = await uploadForm.file.text();
-
-      setUploadStatus({ stage: 'parsing', message: 'Parsing ECG records…' });
-      const { records, errors } = parseEcgCsv(text);
+      let records = [], errors = [], results;
+      if (uploadForm.format === 'csv') {
+        const text = await uploadForm.file.text();
+        setUploadStatus({ stage: 'parsing', message: 'Validating ECG records…' });
+        ({ records, errors } = parseEcgCsv(text));
+      } else {
+        records = uploadForm.files;
+      }
 
       setUploadStatus({ stage: 'creating', message: 'Creating dataset…' });
       const dataset = await datasetService.createDataset(
-        { name: uploadForm.datasetName, description: uploadForm.description },
+        { name: uploadForm.datasetName, description: uploadForm.description, metadata: { source_format: uploadForm.format } },
         currentUser.id
       );
 
-      const results = await ecgService.batchUploadRecords(dataset.id, records, (current, total) => {
-        setUploadStatus({ stage: 'uploading', message: `Uploading records…`, progress: `${current}/${total}` });
-      });
+      if (uploadForm.format === 'csv') {
+        results = await ecgService.batchUploadRecords(dataset.id, records, (current, total) => {
+          setUploadStatus({ stage: 'uploading', message: 'Uploading waveforms…', progress: `${current}/${total}` });
+        });
+      } else {
+        results = await ecgService.batchUploadImages(dataset.id, uploadForm.files, (current, total) => {
+          setUploadStatus({ stage: 'uploading', message: 'Uploading ECG images…', progress: `${current}/${total}` });
+        });
+      }
 
       const succeeded = results.filter(r => r.success).length;
       const failed = results.length - succeeded;
@@ -205,7 +247,7 @@ const ECGAnnotationPlatform = () => {
         console.error('Records that failed to upload:', results.filter(r => !r.success));
       }
 
-      setUploadForm({ datasetName: '', description: '', file: null });
+      setUploadForm({ datasetName: '', description: '', file: null, files: [], format: 'images' });
       setView('dashboard');
     } catch (err) {
       console.error('Upload failed:', err);
@@ -243,8 +285,9 @@ const ECGAnnotationPlatform = () => {
       await annotationService.saveAnnotation(record.id, currentUser.id, {
         diagnosis: annotationText,
         status,
-        findings: null,
-        confidenceScore: null
+        findings: annotationFindings || null,
+        confidenceScore: Number(confidenceScore),
+        imageMarks
       });
 
       if (currentRecordIndex < currentDatasetRecords.length - 1) {
@@ -385,22 +428,32 @@ const ECGAnnotationPlatform = () => {
         <div className="bg-white rounded-lg shadow-md p-8">
           <div className="mb-6">
             <h2 className="text-xl font-semibold text-gray-800 mb-2">Upload New Dataset</h2>
-            <p className="text-gray-600">Upload real 12-lead ECG data in CSV format for collaborative annotation.</p>
+            <p className="text-gray-600">Upload ECG scans/photos or digitized 12-lead waveform CSV files for collaborative annotation.</p>
           </div>
 
           <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Dataset Name *</label>
-              <input
-                type="text"
-                placeholder="e.g., Hospital A - Cardiology Department"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                value={uploadForm.datasetName}
-                onChange={(e) => setUploadForm({ ...uploadForm, datasetName: e.target.value })}
-              />
+            <div className="flex rounded-lg bg-gray-100 p-1">
+              <button onClick={() => setUploadForm({ ...uploadForm, format: 'images' })} className={`flex-1 py-2 rounded-md ${uploadForm.format === 'images' ? 'bg-white shadow text-blue-700' : 'text-gray-600'}`}>ECG images</button>
+              <button onClick={() => setUploadForm({ ...uploadForm, format: 'csv' })} className={`flex-1 py-2 rounded-md ${uploadForm.format === 'csv' ? 'bg-white shadow text-blue-700' : 'text-gray-600'}`}>Digitized waveform CSV</button>
             </div>
 
             <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Dataset Name *</label>
+              <input type="text" placeholder="e.g., Hospital A - ECG scans" className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" value={uploadForm.datasetName} onChange={(e) => setUploadForm({ ...uploadForm, datasetName: e.target.value })} />
+            </div>
+
+            {uploadForm.format === 'images' ? <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">ECG image files *</label>
+              <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
+                <Upload className="mx-auto text-gray-400 mb-2" size={48} />
+                <p className="text-gray-600 mb-2">{uploadForm.files.length ? `${uploadForm.files.length} image(s) selected` : 'Select ECG exports, scans, or phone photographs'}</p>
+                <input type="file" multiple accept="image/jpeg,image/png,image/webp,image/bmp" onChange={handleImageUpload} className="hidden" id="image-upload" />
+                <label htmlFor="image-upload" className="inline-block px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 cursor-pointer">Select Images</label>
+              </div>
+              <p className="text-sm text-gray-500 mt-2">Supported browser-safe formats: JPG/JPEG, PNG, WebP and BMP. Each image becomes one annotatable record.</p>
+            </div> : null}
+
+            {uploadForm.format === 'csv' && <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
               <textarea
                 placeholder="Describe the dataset, collection method, or any relevant notes..."
@@ -409,7 +462,7 @@ const ECGAnnotationPlatform = () => {
                 value={uploadForm.description}
                 onChange={(e) => setUploadForm({ ...uploadForm, description: e.target.value })}
               />
-            </div>
+            </div>}
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">ECG Data File (CSV) *</label>
@@ -677,6 +730,12 @@ const ECGAnnotationPlatform = () => {
                 </div>
               )}
 
+              {record.source_type === 'image' ? (
+                <div className="bg-white rounded-lg shadow p-6 mb-6">
+                  <h3 className="font-semibold text-gray-700 mb-4">ECG Image — {record.image_original_name}</h3>
+                  <EcgImageAnnotator imageUrl={record.imageUrl} marks={imageMarks} onChange={setImageMarks} readOnly={reviewMode} />
+                </div>
+              ) : <>
               <div className="bg-white rounded-lg shadow p-6 mb-6">
                 <div className="flex justify-between items-center mb-4">
                   <h3 className="font-semibold text-gray-700">Lead Selection</h3>
@@ -736,6 +795,7 @@ const ECGAnnotationPlatform = () => {
                   })}
                 </div>
               </div>
+              </>}
 
               {!reviewMode && (
                 <div className="bg-white rounded-lg shadow p-6">
@@ -747,6 +807,17 @@ const ECGAnnotationPlatform = () => {
                     value={annotationText}
                     onChange={(e) => setAnnotationText(e.target.value)}
                   />
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                    <div className="md:col-span-2">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Structured findings</label>
+                      <input value={annotationFindings} onChange={(e) => setAnnotationFindings(e.target.value)} placeholder="e.g. ST elevation V2–V4; sinus rhythm" className="w-full px-3 py-2 border rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Confidence: {confidenceScore}%</label>
+                      <input type="range" min="0" max="100" value={confidenceScore} onChange={(e) => setConfidenceScore(e.target.value)} className="w-full" />
+                    </div>
+                  </div>
 
                   <div className="flex gap-4 mb-4">
                     <button
@@ -985,6 +1056,23 @@ const ECGAnnotationPlatform = () => {
   // ---------------------------------------------------------------------
   // Main render
   // ---------------------------------------------------------------------
+  if (authLoading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin" /></div>;
+  if (!currentUser) return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+      <form onSubmit={submitAuth} className="w-full max-w-md bg-white shadow-lg rounded-xl p-8 space-y-4">
+        <div className="flex items-center gap-2"><Heart className="text-red-500" /><h1 className="text-2xl font-bold">LabelECG</h1></div>
+        <p className="text-gray-600">Sign in to securely upload and annotate real ECG records.</p>
+        {authMode === 'signup' && <>
+          <input required placeholder="Name" value={authForm.username} onChange={(e) => setAuthForm({...authForm, username:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
+          <input placeholder="Hospital / institution" value={authForm.hospitalName} onChange={(e) => setAuthForm({...authForm, hospitalName:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
+        </>}
+        <input required type="email" placeholder="Email" value={authForm.email} onChange={(e) => setAuthForm({...authForm, email:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
+        <input required minLength="8" type="password" placeholder="Password" value={authForm.password} onChange={(e) => setAuthForm({...authForm, password:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
+        <button className="w-full bg-blue-600 text-white rounded-lg py-2.5 font-semibold">{authMode === 'signin' ? 'Sign in' : 'Create annotator account'}</button>
+        <button type="button" onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')} className="w-full text-blue-600 text-sm">{authMode === 'signin' ? 'Create an account' : 'Already registered? Sign in'}</button>
+      </form>
+    </div>
+  );
   if (view === 'dashboard') return renderDashboard();
   if (view === 'upload') return renderUpload();
   if (view === 'datasets') return renderDatasets();

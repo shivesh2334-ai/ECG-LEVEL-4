@@ -39,24 +39,16 @@ export const authService = {
     const { data: authData, error: authError } = await supabase.auth.signUp({
       email,
       password,
+      options: { data: {
+        username: userData.username,
+        role: userData.role || 'annotator',
+        hospital_name: userData.hospitalName || ''
+      }}
     })
 
     if (authError) throw authError
 
-    // Create user profile row (id must match auth.users.id — see schema.sql)
-    const { data, error } = await supabase
-      .from('users')
-      .insert([{
-        id: authData.user.id,
-        username: userData.username,
-        email: email,
-        role: userData.role,
-        hospital_name: userData.hospitalName
-      }])
-      .select()
-
-    if (error) throw error
-    return data[0]
+    return authData.user
   },
 
   // Sign in
@@ -187,6 +179,14 @@ export const ecgService = {
 
     if (recordError) throw recordError
 
+    if (record.source_type === 'image') {
+      const { data: signed, error: signedError } = await supabase.storage
+        .from('ecg-images')
+        .createSignedUrl(record.image_path, 3600)
+      if (signedError) throw signedError
+      return { ...record, imageUrl: signed.signedUrl, leads: null }
+    }
+
     const { data: rawData, error: rawError } = await supabase
       .from('ecg_raw_data')
       .select('*')
@@ -214,6 +214,47 @@ export const ecgService = {
       samplingRate: rawData.sampling_rate,
       duration: rawData.duration
     }
+  },
+
+  async uploadImageRecord(datasetId, file, recordData = {}) {
+    const extension = (file.name.split('.').pop() || 'bin').toLowerCase()
+    const storagePath = `${datasetId}/${crypto.randomUUID()}.${extension}`
+    const { error: storageError } = await supabase.storage
+      .from('ecg-images')
+      .upload(storagePath, file, { contentType: file.type, upsert: false })
+    if (storageError) throw storageError
+
+    const { data, error } = await supabase.from('ecg_records').insert([{
+      dataset_id: datasetId,
+      patient_id: recordData.patientId || file.name.replace(/\.[^.]+$/, ''),
+      record_number: recordData.recordNumber,
+      timestamp: recordData.timestamp || new Date(file.lastModified || Date.now()).toISOString(),
+      source_type: 'image',
+      image_path: storagePath,
+      image_mime_type: file.type,
+      image_original_name: file.name,
+      metadata: { file_size: file.size, ...(recordData.metadata || {}) }
+    }]).select().single()
+
+    if (error) {
+      await supabase.storage.from('ecg-images').remove([storagePath])
+      throw error
+    }
+    return data
+  },
+
+  async batchUploadImages(datasetId, files, onProgress) {
+    const results = []
+    for (let i = 0; i < files.length; i++) {
+      try {
+        const data = await this.uploadImageRecord(datasetId, files[i], { recordNumber: i + 1 })
+        results.push({ success: true, data })
+      } catch (error) {
+        results.push({ success: false, error: error.message, file: files[i].name })
+      }
+      onProgress?.(i + 1, files.length)
+    }
+    return results
   },
 
   // Insert one real ECG record (metadata + 12 lead sample arrays).
@@ -329,6 +370,7 @@ export const annotationService = {
           status: annotationData.status,
           findings: annotationData.findings,
           confidence_score: annotationData.confidenceScore,
+          image_marks: annotationData.imageMarks || [],
           updated_at: new Date().toISOString()
         })
         .eq('id', existing.id)
@@ -354,7 +396,8 @@ export const annotationService = {
           diagnosis: annotationData.diagnosis,
           status: annotationData.status,
           findings: annotationData.findings,
-          confidence_score: annotationData.confidenceScore
+          confidence_score: annotationData.confidenceScore,
+          image_marks: annotationData.imageMarks || []
         }])
         .select()
         .single()

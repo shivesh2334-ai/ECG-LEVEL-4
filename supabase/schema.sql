@@ -16,6 +16,24 @@ create table if not exists public.users (
   created_at timestamptz not null default now()
 );
 
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  insert into public.users (id, username, email, role, hospital_name)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1)) || '-' || left(new.id::text, 6),
+    new.email,
+    'annotator',
+    new.raw_user_meta_data->>'hospital_name'
+  );
+  return new;
+end; $$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created after insert on auth.users
+  for each row execute procedure public.handle_new_user();
+
 -- ---------------------------------------------------------------------------
 -- datasets: a named collection of ECG records uploaded by one user
 -- ---------------------------------------------------------------------------
@@ -43,6 +61,10 @@ create table if not exists public.ecg_records (
   qrs_duration integer,
   qt_interval integer,
   auto_analysis text,
+  source_type text not null default 'waveform' check (source_type in ('waveform', 'image')),
+  image_path text,
+  image_mime_type text,
+  image_original_name text,
   metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now()
 );
@@ -82,6 +104,7 @@ create table if not exists public.annotations (
   status text not null default 'unsure' check (status in ('confirmed', 'unsure', 'reviewed')),
   findings text,
   confidence_score numeric,
+  image_marks jsonb not null default '[]'::jsonb,
   reviewed_by uuid references public.users(id) on delete set null,
   reviewed_at timestamptz,
   review_notes text,
@@ -174,6 +197,19 @@ create policy "authenticated read annotation_history" on public.annotation_histo
   for select using (auth.role() = 'authenticated');
 create policy "authenticated write annotation_history" on public.annotation_history
   for insert with check (auth.role() = 'authenticated');
+
+-- Private ECG image objects. The UI reads them through short-lived signed URLs.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('ecg-images', 'ecg-images', false, 20971520,
+  array['image/jpeg', 'image/png', 'image/webp', 'image/bmp'])
+on conflict (id) do update set public = false;
+
+create policy "authenticated upload ecg images" on storage.objects
+  for insert to authenticated with check (bucket_id = 'ecg-images');
+create policy "authenticated read ecg images" on storage.objects
+  for select to authenticated using (bucket_id = 'ecg-images');
+create policy "authenticated delete ecg images" on storage.objects
+  for delete to authenticated using (bucket_id = 'ecg-images');
 
 -- =============================================================================
 -- SQL functions used by the app (src/lib/supabase.js)

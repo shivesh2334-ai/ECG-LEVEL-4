@@ -1,8 +1,9 @@
 # LabelECG (ECG-LEVEL-4)
 
-A distributed ECG annotation platform. Clinicians and technicians upload real
-12-lead ECG datasets, annotate records collaboratively, and experts/admins
-review the results.
+A distributed ECG annotation platform for real ECG scans, photographs, exported
+images, and digitized 12-lead waveforms. Annotators can draw labeled regions on
+an ECG image, record structured findings and confidence, or inspect waveform
+samples lead by lead. Experts/admins retain the existing review workflow.
 
 > ⚠️ **Security note:** an earlier version of this repo accidentally committed
 > real Supabase credentials (service role key, JWT secret, database
@@ -15,6 +16,19 @@ review the results.
 > still exist in git history or in clones/forks.
 
 ## What changed in this update
+
+- **Real ECG image annotation.** Batch upload JPG/JPEG, PNG, WebP, or BMP ECG
+  files. Drag normalized, labeled boxes over P waves, QRS complexes, T waves,
+  ST segments, artifacts, rhythm strips, or other regions. Markings stay aligned
+  at different screen sizes and are saved with the annotation.
+- **Private image storage.** Image binaries now live in the private Supabase
+  Storage bucket `ecg-images`; Postgres stores only record metadata and storage
+  paths. The browser receives a one-hour signed URL when a record is opened.
+- **Structured annotation.** Diagnosis, findings, confidence (0–100), status,
+  and image regions are persisted. Existing team review, audit history, dataset
+  progress, account history, CSV import, and waveform displays remain in place.
+- **Working authentication bootstrap.** New accounts are created through
+  Supabase Auth and a database trigger creates the matching application profile.
 
 - **Real ECG data only.** All hardcoded demo datasets, demo user accounts,
   and randomly-generated waveform data have been removed. The previous
@@ -42,12 +56,14 @@ review the results.
 ## 2. Set up the database
 
 1. Create a new Supabase project.
-2. Open **SQL Editor** in the Supabase dashboard, paste the contents of
+2. For a new database, open **SQL Editor**, paste the contents of
    [`supabase/schema.sql`](./supabase/schema.sql), and run it. This creates
-   all tables, row-level security policies, and the SQL functions the app
-   calls (`get_dataset_progress`, `get_dataset_annotator_summary`,
-   `get_user_annotation_stats`).
-3. In **Authentication → Providers**, make sure Email sign-up is enabled.
+   the tables, private Storage bucket, RLS policies, auth-profile trigger, and
+   SQL functions used by the app.
+3. For an existing LabelECG database, run only
+   [`supabase/migrations/202608290001_image_annotation.sql`](./supabase/migrations/202608290001_image_annotation.sql).
+   It is an additive migration and preserves existing datasets and waveforms.
+4. In **Authentication → Providers**, make sure Email sign-up is enabled.
    For local development you may want to disable "Confirm email" so you can
    log in immediately after registering.
 
@@ -94,7 +110,24 @@ If deploying to Vercel, set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`
 as environment variables in the Vercel project settings — `.env` files are
 not deployed.
 
-## 5. Uploading a real ECG dataset
+## 5. Uploading and annotating real ECGs
+
+### ECG images
+
+Choose **ECG images**, enter a dataset name, and select one or more JPG/JPEG,
+PNG, WebP, or BMP files (maximum 20 MB each). Each file becomes one record. The
+filename without its extension is used as the initial patient/record identifier;
+use de-identified filenames before upload.
+
+On the annotation screen, choose a region label and drag a box over the image.
+Add the clinical interpretation, structured findings, and confidence, then save
+as Confirmed or Unsure. Image regions are stored as normalized JSON coordinates,
+not burned into or used to modify the original image.
+
+TIFF, PDF, DICOM, SCP-ECG, and HEIC are not accepted directly because browser
+support is inconsistent. Convert page/image exports to PNG or JPEG before upload.
+
+### Digitized waveform CSV
 
 Go to **Upload Data**. The uploader expects a CSV with one row per ECG
 record and these columns (header required, in any order):
@@ -130,9 +163,12 @@ src/
   lib/
     supabase.js        — Supabase client + all data-access functions
     ecgFileParser.js    — real-CSV → record parser (no synthetic data)
+  components/
+    EcgImageAnnotator.jsx — resolution-independent image region annotation
   main.jsx
 supabase/
   schema.sql           — tables, RLS policies, SQL functions
+  migrations/          — additive upgrades for an existing database
 public/
   sample-ecg-template.csv
 .env.example
@@ -140,13 +176,11 @@ public/
 
 ## 7. Known limitations / next steps
 
-- Roles (`annotator` / `expert` / `admin`) are self-selected at signup for
-  simplicity. For production, gate `expert`/`admin` behind an approval step
-  or admin-assigned role instead of trusting user input.
-- CSV is the only supported real-data import format right now. If you need
-  to import a large batch of WFDB/PhysioNet records directly, write a small
-  offline script that converts them to the CSV shape above (or extend
-  `ecgFileParser.js`).
+- New registrations are always assigned `annotator`. Promote vetted users to
+  `expert` or `admin` through a controlled administrative database workflow.
+- WFDB, DICOM, SCP-ECG, TIFF, PDF, and HEIC still require conversion before
+  upload; their parsing dependencies and vendor variations are not bundled in
+  this browser-only client.
 - The Supabase RLS policies here are a starting point, not a HIPAA/clinical
   compliance package — review them with your institution before storing
   real patient data.
