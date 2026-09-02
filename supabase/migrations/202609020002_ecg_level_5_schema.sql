@@ -40,9 +40,25 @@ update public.ecg_records
 set subject_key = patient_id
 where subject_key is null;
 
-update public.ecg_records
-set lead_count = case when source_type = 'waveform' then 12 else null end
-where lead_count is null;
+-- Some early Level 4 deployments predate ecg_records.source_type. Populate the
+-- canonical 12-lead count when that legacy discriminator is available, while
+-- keeping this additive migration compatible with those older databases.
+do $
+begin
+  if exists (
+    select 1
+    from information_schema.columns
+    where table_schema = 'public'
+      and table_name = 'ecg_records'
+      and column_name = 'source_type'
+  ) then
+    execute $sql$
+      update public.ecg_records
+      set lead_count = case when source_type = 'waveform' then 12 else null end
+      where lead_count is null
+    $sql$;
+  end if;
+end $;
 
 do $$ begin
   alter table public.ecg_records
