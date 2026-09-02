@@ -1,5 +1,11 @@
 # LabelECG (ECG-LEVEL-4)
 
+> **ECG-LEVEL-5 schema foundation is available.** Apply
+> [`supabase/migrations/202609020002_ecg_level_5_schema.sql`](./supabase/migrations/202609020002_ecg_level_5_schema.sql)
+> after the Level 4 migrations. The complete architecture, workflow and data
+> contract are documented in
+> [`docs/ECG_LEVEL_5_TECHNICAL_SPECIFICATION.md`](./docs/ECG_LEVEL_5_TECHNICAL_SPECIFICATION.md).
+
 A distributed ECG annotation platform for real ECG scans, photographs, exported
 images, and digitized 12-lead waveforms. Annotators can draw labeled regions on
 an ECG image, record structured findings and confidence, or inspect waveform
