@@ -52,9 +52,30 @@ const ECGAnnotationPlatform = () => {
   // Data loading effects
   // ---------------------------------------------------------------------
   useEffect(() => {
-    authService.getCurrentUser().then(setCurrentUser).catch(console.error).finally(() => setAuthLoading(false));
+    const loadAuthenticatedUser = () => {
+      authService.getCurrentUser()
+        .then((profile) => {
+          setCurrentUser(profile);
+          if (profile) setAuthMessage('');
+        })
+        .catch((error) => {
+          console.error('Could not load the signed-in profile:', error);
+          setCurrentUser(null);
+          setAuthMessage(error.message);
+        })
+        .finally(() => setAuthLoading(false));
+    };
+
+    loadAuthenticatedUser();
     const { data: listener } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'SIGNED_IN') authService.getCurrentUser().then(setCurrentUser).catch(console.error);
+      if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+        // Defer database work until Supabase finishes updating the auth session.
+        setTimeout(loadAuthenticatedUser, 0);
+      }
+      if (event === 'SIGNED_OUT') {
+        setCurrentUser(null);
+        setAuthLoading(false);
+      }
     });
     return () => listener.subscription.unsubscribe();
   }, []);
@@ -62,6 +83,7 @@ const ECGAnnotationPlatform = () => {
   const submitAuth = async (event) => {
     event.preventDefault();
     setAuthLoading(true);
+    setAuthMessage('');
     try {
       if (authMode === 'signup') {
         await authService.signUp(authForm.email, authForm.password, { ...authForm, role: 'annotator' });
@@ -71,7 +93,11 @@ const ECGAnnotationPlatform = () => {
       } else {
         setCurrentUser(await authService.signIn(authForm.email, authForm.password));
       }
-    } catch (err) { alert(err.message); } finally { setAuthLoading(false); }
+    } catch (err) {
+      setAuthMessage(err.message);
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const sendMagicLink = async () => {
@@ -1096,7 +1122,7 @@ const ECGAnnotationPlatform = () => {
           <button type="button" onClick={sendMagicLink} className="w-full border border-blue-600 text-blue-700 rounded-lg py-2.5 font-semibold hover:bg-blue-50">Email me a sign-in link</button>
           <p className="text-xs text-gray-500 text-center">No password required. The link is sent only to an existing account.</p>
         </>}
-        {authMessage && <p role="status" className="text-sm rounded-lg bg-blue-50 text-blue-800 p-3">{authMessage}</p>}
+        {authMessage && <p role="alert" className="text-sm rounded-lg bg-blue-50 text-blue-800 p-3">{authMessage}</p>}
         <button type="button" onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')} className="w-full text-blue-600 text-sm">{authMode === 'signin' ? 'Create an account' : 'Already registered? Sign in'}</button>
       </form>
     </div>

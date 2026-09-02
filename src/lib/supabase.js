@@ -30,6 +30,48 @@ export const supabase = missingCredentials
   ? null
   : createClient(supabaseUrl, supabaseAnonKey)
 
+const profileForAuthUser = (user) => {
+  const metadata = user.user_metadata || {}
+  const emailName = (user.email || 'annotator').split('@')[0]
+
+  return {
+    id: user.id,
+    username: `${metadata.username || emailName}-${user.id.slice(0, 6)}`,
+    email: user.email,
+    role: 'annotator',
+    hospital_name: metadata.hospital_name || null
+  }
+}
+
+// Authentication and application profiles live in separate Supabase tables.
+// Accounts created before the profile trigger was installed can therefore be
+// valid Auth users without a public.users row. Repair those accounts on login;
+// the RLS policy only permits a signed-in user to insert their own profile.
+const getOrCreateUserProfile = async (user) => {
+  const { data: existing, error: selectError } = await supabase
+    .from('users')
+    .select('*')
+    .eq('id', user.id)
+    .maybeSingle()
+
+  if (selectError) throw selectError
+  if (existing) return existing
+
+  const { data: created, error: insertError } = await supabase
+    .from('users')
+    .insert([profileForAuthUser(user)])
+    .select()
+    .single()
+
+  if (insertError) {
+    throw new Error(
+      `Your identity was verified, but the application profile could not be created: ${insertError.message}`
+    )
+  }
+
+  return created
+}
+
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
@@ -60,14 +102,7 @@ export const authService = {
 
     if (error) throw error
 
-    const { data: userData, error: userError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', data.user.id)
-      .single()
-
-    if (userError) throw userError
-    return userData
+    return getOrCreateUserProfile(data.user)
   },
 
   // Send a passwordless email Magic Link to an existing account.
@@ -95,14 +130,7 @@ export const authService = {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return null
 
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', user.id)
-      .maybeSingle()
-
-    if (error) throw error
-    return data
+    return getOrCreateUserProfile(user)
   }
 }
 

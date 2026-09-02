@@ -73,6 +73,10 @@ samples lead by lead. Experts/admins retain the existing review workflow.
    application URL. Add the production URL and `http://localhost:5173` to the
    allowed Redirect URLs as appropriate. Supabase accepts Magic Link callbacks
    only for allowed destinations.
+6. If this Supabase project contains accounts created before the application
+   profile trigger was installed, run
+   [`supabase/migrations/202609020001_repair_auth_profiles.sql`](./supabase/migrations/202609020001_repair_auth_profiles.sql).
+   It backfills missing `public.users` rows without changing existing profiles.
 
 ### Passwordless Magic Link login
 
