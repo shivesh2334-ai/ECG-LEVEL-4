@@ -43,7 +43,7 @@ where subject_key is null;
 -- Some early Level 4 deployments predate ecg_records.source_type. Populate the
 -- canonical 12-lead count when that legacy discriminator is available, while
 -- keeping this additive migration compatible with those older databases.
-do $
+do $level5_compat$
 begin
   if exists (
     select 1
@@ -52,13 +52,14 @@ begin
       and table_name = 'ecg_records'
       and column_name = 'source_type'
   ) then
-    execute $sql$
+    execute $lead_count_update$
       update public.ecg_records
       set lead_count = case when source_type = 'waveform' then 12 else null end
       where lead_count is null
-    $sql$;
+    $lead_count_update$;
   end if;
-end $;
+end
+$level5_compat$;
 
 do $$ begin
   alter table public.ecg_records
