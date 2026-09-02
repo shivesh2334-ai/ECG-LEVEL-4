@@ -25,7 +25,7 @@ values (
   'ecg-images',
   false,
   20971520,
-  array['image/jpeg', 'image/png', 'image/webp', 'image/tiff', 'application/pdf']
+  array['image/jpeg', 'image/png', 'image/webp', 'image/tiff']
 )
 on conflict (id) do update
 set public = excluded.public,
