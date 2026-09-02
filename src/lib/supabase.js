@@ -221,12 +221,17 @@ export const ecgService = {
 
     if (recordError) throw recordError
 
-    if (record.source_type === 'image') {
+    if (record.source_type === 'image' || record.image_path) {
+      if (!record.image_path) {
+        throw new Error('This image ECG record has no stored image path')
+      }
       const { data: signed, error: signedError } = await supabase.storage
         .from('ecg-images')
         .createSignedUrl(record.image_path, 3600)
-      if (signedError) throw signedError
-      return { ...record, imageUrl: signed.signedUrl, leads: null }
+      if (signedError) {
+        throw new Error(`Could not open the ECG image: ${signedError.message}`)
+      }
+      return { ...record, source_type: 'image', imageUrl: signed.signedUrl, leads: null }
     }
 
     const { data: rawData, error: rawError } = await supabase
@@ -259,6 +264,9 @@ export const ecgService = {
   },
 
   async uploadImageRecord(datasetId, file, recordData = {}) {
+    if (!file?.type?.startsWith('image/')) {
+      throw new Error(`${file?.name || 'File'} is not a supported ECG image. Use PNG, JPEG, WebP, or TIFF.`)
+    }
     const extension = (file.name.split('.').pop() || 'bin').toLowerCase()
     const storagePath = `${datasetId}/${crypto.randomUUID()}.${extension}`
     const { error: storageError } = await supabase.storage
@@ -402,58 +410,47 @@ export const annotationService = {
 
   // Create or update the signed-in user's annotation for a record
   async saveAnnotation(recordId, userId, annotationData) {
+    const { data: { user }, error: authError } = await supabase.auth.getUser()
+    if (authError) throw authError
+    if (!user || user.id !== userId) throw new Error('Your sign-in session is no longer valid')
+
     const existing = await this.getUserAnnotation(recordId, userId)
-
-    if (existing) {
-      const { data, error } = await supabase
-        .from('annotations')
-        .update({
-          diagnosis: annotationData.diagnosis,
-          status: annotationData.status,
-          findings: annotationData.findings,
-          confidence_score: annotationData.confidenceScore,
-          image_marks: annotationData.imageMarks || [],
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', existing.id)
-        .select()
-        .single()
-
-      if (error) throw error
-
-      await this.logAnnotationHistory(existing.id, userId, 'updated', {
-        old_diagnosis: existing.diagnosis,
-        new_diagnosis: annotationData.diagnosis,
-        old_status: existing.status,
-        new_status: annotationData.status
-      })
-
-      return data
-    } else {
-      const { data, error } = await supabase
-        .from('annotations')
-        .insert([{
-          ecg_record_id: recordId,
-          annotator_id: userId,
-          diagnosis: annotationData.diagnosis,
-          status: annotationData.status,
-          findings: annotationData.findings,
-          confidence_score: annotationData.confidenceScore,
-          image_marks: annotationData.imageMarks || []
-        }])
-        .select()
-        .single()
-
-      if (error) throw error
-
-      await this.logAnnotationHistory(data.id, userId, 'created', {
-        new_diagnosis: annotationData.diagnosis,
-        new_status: annotationData.status
-      })
-
-      return data
+    const payload = {
+      ecg_record_id: recordId,
+      annotator_id: userId,
+      diagnosis: annotationData.diagnosis?.trim() || null,
+      status: annotationData.status,
+      findings: annotationData.findings?.trim() || null,
+      confidence_score: annotationData.confidenceScore,
+      image_marks: annotationData.imageMarks || [],
+      updated_at: new Date().toISOString()
     }
-  },
+
+    const { data, error } = await supabase
+      .from('annotations')
+      .upsert(payload, { onConflict: 'ecg_record_id,annotator_id' })
+      .select()
+      .single()
+
+    if (error) {
+      throw new Error(`Annotation could not be stored: ${error.message}`)
+    }
+
+    try {
+      await this.logAnnotationHistory(data.id, userId, existing ? 'updated' : 'created', {
+        old_diagnosis: existing?.diagnosis,
+        new_diagnosis: data.diagnosis,
+        old_status: existing?.status,
+        new_status: data.status
+      })
+    } catch (historyError) {
+      // The annotation is already durable. Do not tell the clinician it failed
+      // merely because the secondary audit insert was unavailable.
+      console.warn('Annotation saved but history logging failed:', historyError)
+    }
+
+    return data
+  }
 
   // Review an annotation (expert/admin only — also enforced by RLS)
   async reviewAnnotation(annotationId, reviewerId, reviewNotes) {
