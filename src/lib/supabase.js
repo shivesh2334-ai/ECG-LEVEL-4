@@ -191,7 +191,7 @@ export const datasetService = {
 
     if (error) throw error
     return data
-  }
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +450,7 @@ export const annotationService = {
     }
 
     return data
-  }
+  },
 
   // Review an annotation (expert/admin only — also enforced by RLS)
   async reviewAnnotation(annotationId, reviewerId, reviewNotes) {
