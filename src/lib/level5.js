@@ -138,23 +138,33 @@ export const level5AnnotationService = {
   },
 
   async getSessionBundle(sessionId) {
-    const [session, beats, waves, rhythms, measurements, diagnoses] = await Promise.all([
+    const [session, beats, waves, rhythms, measurements, diagnoses, imageRegions] = await Promise.all([
       supabase.from('annotation_sessions').select('*').eq('id', sessionId).single(),
       supabase.from('beat_annotations').select('*').eq('session_id', sessionId).order('sample_index'),
       supabase.from('wave_annotations').select('*').eq('session_id', sessionId).order('lead_name').order('beat_sample'),
       supabase.from('rhythm_annotations').select('*').eq('session_id', sessionId).order('start_sample'),
       supabase.from('measurement_annotations').select('*').eq('session_id', sessionId).order('measurement_code'),
-      supabase.from('diagnosis_annotations').select('*, term:diagnosis_term_id(*)').eq('session_id', sessionId)
+      supabase.from('diagnosis_annotations').select('*, term:diagnosis_term_id(*)').eq('session_id', sessionId),
+      supabase.from('image_region_annotations').select('*').eq('session_id', sessionId).order('created_at')
     ])
-    ;[session, beats, waves, rhythms, measurements, diagnoses].forEach(result => throwIfError(result.error))
+    ;[session, beats, waves, rhythms, measurements, diagnoses, imageRegions].forEach(result => throwIfError(result.error))
     return {
       session: session.data,
       beats: beats.data || [],
       waves: waves.data || [],
       rhythms: rhythms.data || [],
       measurements: measurements.data || [],
-      diagnoses: diagnoses.data || []
+      diagnoses: diagnoses.data || [],
+      imageRegions: imageRegions.data || []
     }
+  },
+
+  async replaceImageRegions(sessionId, regions) {
+    const { error } = await supabase.rpc('replace_image_region_annotations', {
+      session_uuid: sessionId,
+      regions: regions.map(({ label, x, y, width, height }) => ({ label, x, y, width, height }))
+    })
+    throwIfError(error)
   },
 
   async addBeat(sessionId, beat) {
