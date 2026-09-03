@@ -101,6 +101,20 @@ export const level5SourceService = {
 }
 
 export const level5AnnotationService = {
+  async listForRecord(recordId) {
+    const { data, error } = await supabase
+      .from('annotation_sessions')
+      .select(`
+        *,
+        annotator:annotator_id (id, username, role),
+        protocol:protocol_id (id, name, version)
+      `)
+      .eq('ecg_record_id', recordId)
+      .order('created_at', { ascending: false })
+    throwIfError(error)
+    return data || []
+  },
+
   async createSession(recordId, options = {}) {
     const { data: { user }, error: authError } = await supabase.auth.getUser()
     throwIfError(authError)
