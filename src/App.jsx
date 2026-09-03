@@ -4,6 +4,7 @@ import { User, Heart, Upload, CheckCircle, AlertCircle, Eye, ChevronLeft, Chevro
 import { supabase, authService, datasetService, ecgService, annotationService, statsService } from './lib/supabase';
 import { parseEcgCsv } from './lib/ecgFileParser';
 import EcgImageAnnotator from './components/EcgImageAnnotator';
+import Level5Workspace from './components/Level5Workspace';
 
 const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
 
@@ -427,6 +428,15 @@ const ECGAnnotationPlatform = () => {
             <CheckCircle className="mb-2" size={32} />
             <h3 className="text-xl font-semibold">Review Annotations</h3>
             <p className="text-sm opacity-90 mt-2">Review and verify annotations from team</p>
+          </button>
+
+          <button
+            onClick={() => setView('level5')}
+            className="bg-slate-800 text-white rounded-lg p-6 hover:bg-slate-900 transition shadow-md text-left"
+          >
+            <FileText className="mb-2" size={32} />
+            <h3 className="text-xl font-semibold">Level 5 Workspace</h3>
+            <p className="text-sm opacity-90 mt-2">Create sample-based sessions, manage provenance, and prepare releases</p>
           </button>
         </div>
 
@@ -1133,6 +1143,7 @@ const ECGAnnotationPlatform = () => {
   if (view === 'annotate') return renderAnnotate();
   if (view === 'review') return renderReview();
   if (view === 'account') return renderAccount();
+  if (view === 'level5') return <Level5Workspace currentUser={currentUser} onBack={() => setView('dashboard')} />;
 
   return null;
 };
