@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from 'recharts';
 import { CheckCircle, Database, FileText, Heart, Loader2, Users } from 'lucide-react';
 import { datasetService, ecgService } from '../lib/supabase';
+import EcgImageAnnotator from './EcgImageAnnotator';
 import {
   level5AnnotationService,
   level5AssignmentService,
@@ -12,7 +13,7 @@ import {
 
 const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
 const SESSION_TYPES = ['primary', 'secondary', 'review', 'adjudication', 'ai_preannotation'];
-const SOURCE_KINDS = ['csv', 'wfdb', 'dicom', 'scp_ecg', 'xml', 'pdf', 'image', 'vendor_binary', 'derived_artifact'];
+const SOURCE_KINDS = ['csv', 'wfdb', 'dicom', 'scp_ecg', 'xml', 'pdf', 'image', 'vendor_binary', 'derived'];
 const SPLIT_OPTIONS = ['train', 'validation', 'test', 'external', 'unassigned'];
 const SPLIT_STRATEGIES = ['patient_level', 'site_level', 'temporal', 'external_only', 'none'];
 
@@ -127,6 +128,7 @@ export default function Level5Workspace({ currentUser, onBack }) {
   const [selectedRecord, setSelectedRecord] = useState(null);
   const [currentSession, setCurrentSession] = useState(null);
   const [currentBundle, setCurrentBundle] = useState(null);
+  const [imageMarks, setImageMarks] = useState([]);
   const [beatForm, setBeatForm] = useState(emptyBeatForm);
   const [waveForm, setWaveForm] = useState(emptyWaveForm);
   const [rhythmForm, setRhythmForm] = useState(emptyRhythmForm);
@@ -150,6 +152,18 @@ export default function Level5Workspace({ currentUser, onBack }) {
   const setStatus = (nextMessage, nextError = '') => {
     setMessage(nextMessage);
     setError(nextError);
+  };
+
+  const applySessionBundle = (bundle) => {
+    setCurrentBundle(bundle);
+    setImageMarks((bundle?.imageRegions || []).map((region) => ({
+      id: region.id,
+      label: region.label,
+      x: Number(region.x),
+      y: Number(region.y),
+      width: Number(region.width),
+      height: Number(region.height)
+    })));
   };
 
   const handleError = (err) => {
@@ -187,7 +201,7 @@ export default function Level5Workspace({ currentUser, onBack }) {
       setSelectedRecordId('');
       setSelectedRecord(null);
       setCurrentSession(null);
-      setCurrentBundle(null);
+      applySessionBundle(null);
       setSelectedVersionId('');
       return;
     }
@@ -211,7 +225,7 @@ export default function Level5Workspace({ currentUser, onBack }) {
     if (!recordId) {
       setSelectedRecord(null);
       setCurrentSession(null);
-      setCurrentBundle(null);
+      applySessionBundle(null);
       setRecordSessions([]);
       setRecordSources([]);
       return;
@@ -240,9 +254,9 @@ export default function Level5Workspace({ currentUser, onBack }) {
       }));
       if (nextSession) {
         const bundle = await level5AnnotationService.getSessionBundle(nextSession.id);
-        setCurrentBundle(bundle);
+        applySessionBundle(bundle);
       } else {
-        setCurrentBundle(null);
+        applySessionBundle(null);
       }
     } catch (err) {
       handleError(err);
@@ -296,12 +310,12 @@ export default function Level5Workspace({ currentUser, onBack }) {
     const session = recordSessions.find((item) => item.id === sessionId) || null;
     setCurrentSession(session);
     if (!session) {
-      setCurrentBundle(null);
+      applySessionBundle(null);
       return;
     }
     await runBusyAction(async () => {
       const bundle = await level5AnnotationService.getSessionBundle(session.id);
-      setCurrentBundle(bundle);
+      applySessionBundle(bundle);
     });
   };
 
@@ -331,6 +345,21 @@ export default function Level5Workspace({ currentUser, onBack }) {
       await level5AnnotationService.submitSession(currentSession.id);
       await refreshCurrentRecord(currentSession.id);
     }, 'Session submitted and locked.');
+  };
+
+  const saveImageRegions = async () => {
+    if (!currentSession) {
+      setStatus('', 'Create or open a draft session before saving image regions.');
+      return;
+    }
+    if (currentSession.status !== 'draft' || currentSession.annotator_id !== currentUser.id) {
+      setStatus('', 'Only your unlocked draft session can be edited.');
+      return;
+    }
+    await runBusyAction(async () => {
+      await level5AnnotationService.replaceImageRegions(currentSession.id, imageMarks);
+      await refreshCurrentRecord(currentSession.id);
+    }, 'Image regions saved to the Level 5 session.');
   };
 
   const addBeat = async (event) => {
@@ -613,7 +642,7 @@ export default function Level5Workspace({ currentUser, onBack }) {
                       {assignment.ecg_record?.dataset?.name || 'Dataset'} · {assignment.ecg_record?.subject_key || assignment.ecg_record?.study_uid || assignment.ecg_record_id}
                     </p>
                     <p className="text-sm text-gray-500">
-                      {assignment.assignment_type} · {assignment.status} · quality {assignment.ecg_record?.quality_status || 'unreviewed'}
+                      {assignment.assignment_role} · {assignment.status} · quality {assignment.ecg_record?.quality_status || 'unreviewed'}
                     </p>
                   </button>
                 ))}
@@ -773,8 +802,34 @@ export default function Level5Workspace({ currentUser, onBack }) {
                   </div>
                 </div>
               ) : (
-                <div className="bg-white rounded-lg shadow p-5 text-sm text-gray-600">
-                  This record is stored as an image reference. Use provenance and diagnostic session tools, or continue using the Level 4 image annotation flow.
+                <div className="bg-white rounded-lg shadow p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <div>
+                      <h2 className="font-semibold text-gray-800">ECG image annotation</h2>
+                      <p className="text-sm text-gray-500">Draw normalized regions directly on the real ECG image.</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={saveImageRegions}
+                      disabled={busy || !currentSession || currentSession.status !== 'draft' || currentSession.annotator_id !== currentUser.id}
+                      className="px-4 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-50"
+                    >
+                      Save image regions
+                    </button>
+                  </div>
+                  {selectedRecord.imageUrl ? (
+                    <EcgImageAnnotator
+                      imageUrl={selectedRecord.imageUrl}
+                      marks={imageMarks}
+                      onChange={setImageMarks}
+                      readOnly={!currentSession || currentSession.status !== 'draft' || currentSession.annotator_id !== currentUser.id}
+                    />
+                  ) : (
+                    <p className="text-sm text-red-600">The stored ECG image could not be opened.</p>
+                  )}
+                  {!currentSession && (
+                    <p className="mt-3 text-sm text-amber-700">Create a Level 5 draft session to add image regions.</p>
+                  )}
                 </div>
               )}
 
