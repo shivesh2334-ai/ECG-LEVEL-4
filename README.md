@@ -33,6 +33,9 @@ samples lead by lead. Experts/admins retain the existing review workflow.
 - **Structured annotation.** Diagnosis, findings, confidence (0–100), status,
   and image regions are persisted. Existing team review, audit history, dataset
   progress, account history, CSV import, and waveform displays remain in place.
+- **Level 5 workspace.** The app now includes a dedicated research workspace
+  for protocol discovery, assignment queues, source provenance, sample-based
+  annotation sessions, and dataset version preparation on top of the Level 4 UI.
 - **Working authentication bootstrap.** New accounts are created through
   Supabase Auth and a database trigger creates the matching application profile.
 - **Passwordless email login.** Existing users can select **Email me a sign-in

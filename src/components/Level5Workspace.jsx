@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from 'recharts';
-import { CheckCircle, Database, FileText, Heart, Loader2, Upload, Users } from 'lucide-react';
+import { CheckCircle, Database, FileText, Heart, Loader2, Users } from 'lucide-react';
 import { datasetService, ecgService } from '../lib/supabase';
 import {
   level5AnnotationService,
@@ -184,6 +184,10 @@ export default function Level5Workspace({ currentUser, onBack }) {
     if (!datasetId) {
       setRecords([]);
       setDatasetVersions([]);
+      setSelectedRecordId('');
+      setSelectedRecord(null);
+      setCurrentSession(null);
+      setCurrentBundle(null);
       setSelectedVersionId('');
       return;
     }
@@ -197,9 +201,7 @@ export default function Level5Workspace({ currentUser, onBack }) {
       const nextVersionId = versionRows[0]?.id || '';
       setSelectedVersionId((current) => current || nextVersionId);
       setVersionRecordForm((current) => ({ ...current, versionId: current.versionId || nextVersionId }));
-      if (preferredRecordId || recordRows.length > 0) {
-        setSelectedRecordId(preferredRecordId || recordRows[0].id);
-      }
+      setSelectedRecordId(preferredRecordId || recordRows[0]?.id || '');
     } catch (err) {
       handleError(err);
     }
@@ -285,7 +287,7 @@ export default function Level5Workspace({ currentUser, onBack }) {
     const recordId = assignment.ecg_record?.id;
     if (!datasetId || !recordId) return;
     setSelectedDatasetId(datasetId);
-    await loadDatasetContext(datasetId, recordId);
+    setSelectedRecordId(recordId);
     setMessage(`Opened assignment for ${assignment.ecg_record?.subject_key || assignment.ecg_record?.study_uid || assignment.ecg_record?.id}.`);
     setError('');
   };
@@ -411,10 +413,12 @@ export default function Level5Workspace({ currentUser, onBack }) {
     event.preventDefault();
     if (!currentSession) return setStatus('', 'Create a draft session first.');
     const selectedTerm = diagnosisTermMap[diagnosisForm.termId];
+    const displayText = diagnosisForm.displayText || selectedTerm?.display_name || '';
+    if (!displayText) return setStatus('', 'Choose a diagnosis term or enter display text.');
     await runBusyAction(async () => {
       await level5AnnotationService.addDiagnosis(currentSession.id, {
         termId: diagnosisForm.termId || null,
-        displayText: diagnosisForm.displayText || selectedTerm?.display_name || '',
+        displayText,
         certainty: diagnosisForm.certainty,
         leadNames: parseList(diagnosisForm.leadNames),
         startSample: parseInteger(diagnosisForm.startSample),
