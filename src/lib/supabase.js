@@ -119,6 +119,18 @@ export const authService = {
     if (error) throw error
   },
 
+  // Send a password recovery link to an existing account.
+  async sendPasswordReset(email, redirectTo = `${window.location.origin}/?password-recovery=1`) {
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo })
+    if (error) throw error
+  },
+
+  // Change the password for the temporary recovery session.
+  async updatePassword(password) {
+    const { error } = await supabase.auth.updateUser({ password })
+    if (error) throw error
+  },
+
   // Sign out
   async signOut() {
     const { error } = await supabase.auth.signOut()
