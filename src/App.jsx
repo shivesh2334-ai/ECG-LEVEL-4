@@ -8,11 +8,19 @@ import Level5Workspace from './components/Level5Workspace';
 
 const LEAD_NAMES = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF', 'V1', 'V2', 'V3', 'V4', 'V5', 'V6'];
 
+const isPasswordRecoveryRedirect = () => {
+  const query = new URLSearchParams(window.location.search);
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  return query.get('password-recovery') === '1' || hash.get('type') === 'recovery';
+};
+
 const ECGAnnotationPlatform = () => {
   const [currentUser, setCurrentUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authMode, setAuthMode] = useState('signin');
   const [authForm, setAuthForm] = useState({ email: '', password: '', username: '', hospitalName: '' });
+  const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(isPasswordRecoveryRedirect);
+  const [passwordResetForm, setPasswordResetForm] = useState({ password: '', confirmation: '' });
   const [authMessage, setAuthMessage] = useState('');
   const [view, setView] = useState('dashboard');
 
@@ -67,9 +75,22 @@ const ECGAnnotationPlatform = () => {
         .finally(() => setAuthLoading(false));
     };
 
-    loadAuthenticatedUser();
+    if (isPasswordRecoveryRedirect()) {
+      setCurrentUser(null);
+      setAuthLoading(false);
+    } else {
+      loadAuthenticatedUser();
+    }
+
     const { data: listener } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+      if (event === 'PASSWORD_RECOVERY') {
+        setPasswordRecoveryMode(true);
+        setCurrentUser(null);
+        setAuthMessage('');
+        setAuthLoading(false);
+        return;
+      }
+      if ((event === 'SIGNED_IN' || event === 'USER_UPDATED') && !isPasswordRecoveryRedirect()) {
         // Defer database work until Supabase finishes updating the auth session.
         setTimeout(loadAuthenticatedUser, 0);
       }
@@ -99,6 +120,58 @@ const ECGAnnotationPlatform = () => {
     } finally {
       setAuthLoading(false);
     }
+  };
+
+  const sendPasswordReset = async () => {
+    if (!authForm.email) {
+      setAuthMessage('Enter your registered email address first.');
+      return;
+    }
+    setAuthLoading(true);
+    setAuthMessage('');
+    try {
+      await authService.sendPasswordReset(authForm.email);
+      setAuthMessage('If an account exists for that email, a password reset link has been sent.');
+    } catch (err) {
+      setAuthMessage(err.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const submitPasswordReset = async (event) => {
+    event.preventDefault();
+    setAuthMessage('');
+    if (passwordResetForm.password.length < 8) {
+      setAuthMessage('The new password must contain at least 8 characters.');
+      return;
+    }
+    if (passwordResetForm.password !== passwordResetForm.confirmation) {
+      setAuthMessage('The passwords do not match.');
+      return;
+    }
+    setAuthLoading(true);
+    try {
+      await authService.updatePassword(passwordResetForm.password);
+      await authService.signOut();
+      window.history.replaceState({}, document.title, window.location.pathname);
+      setPasswordRecoveryMode(false);
+      setPasswordResetForm({ password: '', confirmation: '' });
+      setAuthForm((current) => ({ ...current, password: '' }));
+      setAuthMessage('Password changed successfully. Sign in with your new password.');
+    } catch (err) {
+      setAuthMessage(err.message);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const cancelPasswordReset = async () => {
+    await authService.signOut();
+    window.history.replaceState({}, document.title, window.location.pathname);
+    setPasswordRecoveryMode(false);
+    setPasswordResetForm({ password: '', confirmation: '' });
+    setAuthMessage('');
   };
 
   const sendMagicLink = async () => {
@@ -1115,6 +1188,41 @@ const ECGAnnotationPlatform = () => {
   // Main render
   // ---------------------------------------------------------------------
   if (authLoading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin" /></div>;
+  if (passwordRecoveryMode) return (
+    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+      <form onSubmit={submitPasswordReset} className="w-full max-w-md bg-white shadow-lg rounded-xl p-8 space-y-4">
+        <div className="flex items-center gap-2"><Heart className="text-red-500" /><h1 className="text-2xl font-bold">Reset password</h1></div>
+        <p className="text-gray-600">Choose a new password for your LabelECG account.</p>
+        <label className="block text-sm font-medium text-gray-700" htmlFor="new-password">New password</label>
+        <input
+          id="new-password"
+          required
+          minLength="8"
+          type="password"
+          autoComplete="new-password"
+          value={passwordResetForm.password}
+          onChange={(event) => setPasswordResetForm((current) => ({ ...current, password: event.target.value }))}
+          className="w-full border rounded-lg px-3 py-2"
+        />
+        <label className="block text-sm font-medium text-gray-700" htmlFor="confirm-password">Confirm new password</label>
+        <input
+          id="confirm-password"
+          required
+          minLength="8"
+          type="password"
+          autoComplete="new-password"
+          value={passwordResetForm.confirmation}
+          onChange={(event) => setPasswordResetForm((current) => ({ ...current, confirmation: event.target.value }))}
+          className="w-full border rounded-lg px-3 py-2"
+        />
+        <button disabled={authLoading} className="w-full bg-blue-600 text-white rounded-lg py-2.5 font-semibold disabled:opacity-50">
+          {authLoading ? 'Updating password…' : 'Update password'}
+        </button>
+        {authMessage ? <p role="alert" className="text-sm rounded-lg bg-blue-50 text-blue-800 p-3">{authMessage}</p> : null}
+        <button type="button" onClick={cancelPasswordReset} className="w-full text-blue-600 text-sm">Cancel and return to sign in</button>
+      </form>
+    </div>
+  );
   if (!currentUser) return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
       <form onSubmit={submitAuth} className="w-full max-w-md bg-white shadow-lg rounded-xl p-8 space-y-4">
@@ -1124,13 +1232,14 @@ const ECGAnnotationPlatform = () => {
           <input required placeholder="Name" value={authForm.username} onChange={(e) => setAuthForm({...authForm, username:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
           <input placeholder="Hospital / institution" value={authForm.hospitalName} onChange={(e) => setAuthForm({...authForm, hospitalName:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
         </>}
-        <input required type="email" placeholder="Email" value={authForm.email} onChange={(e) => setAuthForm({...authForm, email:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
-        <input required minLength="8" type="password" placeholder="Password" value={authForm.password} onChange={(e) => setAuthForm({...authForm, password:e.target.value})} className="w-full border rounded-lg px-3 py-2" />
-        <button className="w-full bg-blue-600 text-white rounded-lg py-2.5 font-semibold">{authMode === 'signin' ? 'Sign in' : 'Create annotator account'}</button>
+        <input required type="email" autoComplete="email" placeholder="Email" value={authForm.email} onChange={(e) => setAuthForm((current) => ({ ...current, email: e.target.value }))} className="w-full border rounded-lg px-3 py-2" />
+        <input required minLength="8" type="password" autoComplete={authMode === 'signin' ? 'current-password' : 'new-password'} placeholder="Password" value={authForm.password} onChange={(e) => setAuthForm((current) => ({ ...current, password: e.target.value }))} className="w-full border rounded-lg px-3 py-2" />
+        <button disabled={authLoading} className="w-full bg-blue-600 text-white rounded-lg py-2.5 font-semibold disabled:opacity-50">{authLoading ? 'Please wait…' : authMode === 'signin' ? 'Sign in' : 'Create annotator account'}</button>
         {authMode === 'signin' && <>
           <div className="flex items-center gap-3 text-xs text-gray-400"><span className="h-px bg-gray-200 flex-1" /><span>OR</span><span className="h-px bg-gray-200 flex-1" /></div>
-          <button type="button" onClick={sendMagicLink} className="w-full border border-blue-600 text-blue-700 rounded-lg py-2.5 font-semibold hover:bg-blue-50">Email me a sign-in link</button>
+          <button type="button" onClick={sendMagicLink} disabled={authLoading} className="w-full border border-blue-600 text-blue-700 rounded-lg py-2.5 font-semibold hover:bg-blue-50 disabled:opacity-50">Email me a sign-in link</button>
           <p className="text-xs text-gray-500 text-center">No password required. The link is sent only to an existing account.</p>
+          <button type="button" onClick={sendPasswordReset} disabled={authLoading} className="w-full text-blue-600 text-sm disabled:opacity-50">Forgot password?</button>
         </>}
         {authMessage && <p role="alert" className="text-sm rounded-lg bg-blue-50 text-blue-800 p-3">{authMessage}</p>}
         <button type="button" onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')} className="w-full text-blue-600 text-sm">{authMode === 'signin' ? 'Create an account' : 'Already registered? Sign in'}</button>
